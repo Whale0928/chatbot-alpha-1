@@ -52,7 +52,10 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64
           push: true
+          # Zot은 단일 OCI manifest만 허용 — provenance/sbom attestation을 비활성화해
+          # manifest list가 아닌 단일 image manifest로 push.
           provenance: false
+          sbom: false
           tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
