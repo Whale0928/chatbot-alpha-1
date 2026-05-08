@@ -1,0 +1,31 @@
+# 시크릿
+.env
+.env.*
+!.env.example
+
+# Go 빌드 산출물
+chatbot-alpha-1
+*.exe
+*.test
+*.out
+bin/
+dist/
+build/
+
+# 의존성
+vendor/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# 로그
+*.log
+logs/
+
+# 임시
+tmp/
+.tmp/
