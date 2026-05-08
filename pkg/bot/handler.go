@@ -138,6 +138,8 @@ func finalizeMeeting(
 		sess.ThreadID, format, dur, len([]rune(rendered)))
 	log.Printf("[미팅/finalize] rendered_preview=%q", previewRunes(rendered, 300))
 
+	sess.LastBotSummary = rendered
+
 	// 결과 마크다운은 sendLongMessage로 (분할 가능). [처음 메뉴] 버튼은 별도 메시지로 첨부 →
 	// 사용자가 같은 스레드에서 다른 메뉴로 이어갈 수 있게 한다.
 	if err := sendLongMessage(msg, sess.ThreadID, rendered); err != nil {

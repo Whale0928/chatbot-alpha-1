@@ -96,7 +96,7 @@ func handleAgentMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess *
 	llmCtx, llmCancel := context.WithTimeout(context.Background(), agentLLMTimeout)
 	defer llmCancel()
 	start := time.Now()
-	resp, err := summarize.Agent(llmCtx, llmClient, content, repos, time.Now())
+	resp, err := summarize.Agent(llmCtx, llmClient, content, sess.LastBotSummary, repos, time.Now())
 	dur := time.Since(start)
 	if err != nil {
 		log.Printf("[agent/llm] ERR elapsed=%s err=%v", dur, err)

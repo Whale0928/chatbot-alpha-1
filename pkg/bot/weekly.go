@@ -201,6 +201,7 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 	sess.LastWeeklyDirective = directive
 	sess.LastWeeklyResponse = resp
 	sess.LastWeeklyCloseable = resp.Closeable
+	sess.LastBotSummary = rendered
 	sess.State = StateSelectMode
 }
 

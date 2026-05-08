@@ -87,6 +87,12 @@ type Session struct {
 	LastWeeklyDirective string                    // 직전 directive (재분석 시 그대로 사용)
 	LastWeeklyResponse  *llm.WeeklyReportResponse // [미팅 시작]에서 첫 노트로 주입
 	LastWeeklyCloseable []llm.ClosableIssue       // [닫기] 액션의 ground truth — confirm/실행 시점에 LLM 재호출 없이 사용
+
+	// LastBotSummary는 같은 스레드에서 직전에 봇이 전송한 마크다운 결과.
+	// weekly 분석 markdown / 미팅 finalize markdown이 채운다.
+	// 에이전트 모드가 사용자 지시에 "이전 대화"를 인용할 때 LLM에 함께 보낸다.
+	// Pod 재시작 시 휘발(현재 세션 스토어 자체가 in-memory).
+	LastBotSummary string
 }
 
 // =====================================================================
