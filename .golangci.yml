@@ -1,0 +1,31 @@
+version: "2"
+
+# 활성 linter는 default(=standard) 그대로. 추가/제거는 enable/disable로.
+linters:
+  default: standard
+
+  exclusions:
+    rules:
+      # ST1005: error 문자열 capitalize 금지 — 한국어/고유명사("Discord 세션 생성 실패")는 무시.
+      - linters:
+          - staticcheck
+        text: "ST1005"
+
+      # 테스트 파일에서는 errcheck 무시 (stub w.Write 등).
+      - path: _test\.go
+        linters:
+          - errcheck
+
+  settings:
+    errcheck:
+      # Discord/HTTP/io.Closer 패턴은 best-effort UI / cleanup이라 에러 무시 의도.
+      # 호출 부 일일이 _ = 붙이는 noise 보다 함수 단위 exclude가 깔끔.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*net/http.Response).Body.Close
+        - (*github.com/bwmarrin/discordgo.Session).ChannelMessageSend
+        - (*github.com/bwmarrin/discordgo.Session).ChannelMessageSendComplex
+        - (*github.com/bwmarrin/discordgo.Session).ChannelMessageDelete
+        - (*github.com/bwmarrin/discordgo.Session).InteractionRespond
+        - (*github.com/bwmarrin/discordgo.Session).Close

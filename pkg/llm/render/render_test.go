@@ -126,7 +126,7 @@ func Test_섹션순서는_결정_확인필요_다음단계이다(t *testing.T) {
 	idxDec := strings.Index(out, "## 결정")
 	idxOpen := strings.Index(out, "## 확인 필요")
 	idxTodo := strings.Index(out, "## 다음 단계")
-	if !(idxDec < idxOpen && idxOpen < idxTodo) {
+	if idxDec >= idxOpen || idxOpen >= idxTodo {
 		t.Errorf("순서 오류 decisions=%d open=%d todo=%d\n%s", idxDec, idxOpen, idxTodo, out)
 	}
 }

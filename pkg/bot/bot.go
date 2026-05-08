@@ -199,12 +199,6 @@ func lookupSession(channelID string) *Session {
 	return nil
 }
 
-func cleanupSession(threadID string) {
-	sessionsMu.Lock()
-	delete(sessions, threadID)
-	sessionsMu.Unlock()
-}
-
 func cleanupSessions() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
@@ -227,20 +221,6 @@ func cleanupSessions() {
 		}
 		sessionsMu.Unlock()
 	}
-}
-
-func isThread(s *discordgo.Session, channelID string) bool {
-	ch, err := s.State.Channel(channelID)
-	if err != nil {
-		ch, err = s.Channel(channelID)
-		if err != nil {
-			// 세션이 존재하는 경우 messageCreate에서 이미 우회되므로 여기 도달 안 함.
-			// 여기 로그가 남는다 = 세션 없는 외부 채널 조회 실패. 드물게 발생.
-			log.Printf("[discord/isThread] WARN 채널 조회 실패 channel=%s err=%v", channelID, err)
-			return false
-		}
-	}
-	return ch.IsThread()
 }
 
 // loadEnvWithLog는 .env를 로드하고 결과를 명시적으로 로그로 남긴다.
