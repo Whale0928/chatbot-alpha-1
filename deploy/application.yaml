@@ -1,0 +1,23 @@
+# ArgoCD Application - chatbot-alpha-1
+# profanity-filter 패턴: 자기 repo의 deploy/overlays/production을 ArgoCD가 직접 sync.
+# k8s-platform 변경 없이 이 파일을 한 번만 kubectl apply하면 등록된다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: chatbot-alpha-1
+  namespace: argocd
+spec:
+  project: chatbot
+  source:
+    repoURL: https://github.com/Whale0928/chatbot-alpha-1
+    path: deploy/overlays/production
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: chatbot-alpha-1
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

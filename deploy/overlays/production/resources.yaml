@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chatbot-alpha-1
+  labels:
+    app: chatbot-alpha-1
+    environment: production

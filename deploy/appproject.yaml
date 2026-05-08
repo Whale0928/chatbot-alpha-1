@@ -1,0 +1,21 @@
+# chatbot AppProject - chatbot-alpha-1 전용 ArgoCD 프로젝트
+# RBAC 분리를 위해 default가 아닌 별도 프로젝트로 등록.
+# 새 chatbot 계열 봇/도구가 늘어나면 여기 destinations / sourceRepos만 추가.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: chatbot
+  namespace: argocd
+spec:
+  description: Personal chatbot / assistant deployments
+  sourceRepos:
+    - https://github.com/Whale0928/chatbot-alpha-1
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: chatbot-alpha-1
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'

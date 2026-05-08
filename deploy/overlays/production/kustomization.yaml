@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: chatbot-alpha-1
+
+resources:
+  - resources.yaml
+  - deployment.yaml
+
+generators:
+  - ksops-generator.yaml
+
+# ArgoCD Image Updater(default-updater)가 newTag를 자동 갱신.
+# 최초 배포 시 첫 git tag와 동일한 값으로 두고, 이후 자동 업데이트에 위임.
+images:
+  - name: docker-registry.bottle-note.com/chatbot-alpha-1
+    newTag: v0.0.1

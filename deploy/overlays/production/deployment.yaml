@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatbot-alpha-1
+  namespace: chatbot-alpha-1
+  labels:
+    app: chatbot-alpha-1
+    environment: production
+spec:
+  # Discord 봇은 단일 Gateway 세션이 권장된다(중복 연결 시 의도치 않은 메시지 처리 중복 발생).
+  # Recreate 전략으로 새 Pod가 뜬 뒤 이전 Pod를 종료하지 않고, 이전 Pod 종료 후 새로 띄운다.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: chatbot-alpha-1
+  template:
+    metadata:
+      labels:
+        app: chatbot-alpha-1
+        environment: production
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      imagePullSecrets:
+        - name: zot-registry-secret
+      containers:
+        - name: chatbot-alpha-1
+          image: docker-registry.bottle-note.com/chatbot-alpha-1
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: chatbot-alpha-1-secrets
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"

@@ -1,0 +1,12 @@
+# KSOPS Secret Generator - .env 6개 키를 SOPS 복호화 후 Secret 생성
+apiVersion: viaduct.ai/v1
+kind: ksops
+metadata:
+  name: chatbot-alpha-1-secret-generator
+  annotations:
+    config.kubernetes.io/function: |
+      exec:
+        path: ksops
+files:
+  - ./env-secret.sops.yaml
+  - ./registry-secret.sops.yaml

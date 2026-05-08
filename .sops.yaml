@@ -1,0 +1,9 @@
+# SOPS 암호화 정책 - chatbot-alpha-1
+# 모든 *.sops.yaml 파일은 deploy + hgkim 두 age 키로 암호화된다.
+# - deploy: ArgoCD repo-server에서 복호화 (in-cluster)
+# - hgkim:  로컬 편집 (~/.config/sops/age/keys.txt)
+creation_rules:
+  - path_regex: '.*\.sops\.yaml$'
+    age: >-
+      age10625rt38awun7dcpgjq4jjgtem0mmxwhqckce2vhjjh3j2gvaq5s32gn0w,
+      age1z9vhwpuvaapjzxyxsttusj6p36jzrwqclfytq0jf4vvwj2vy4ehs4m4c64
