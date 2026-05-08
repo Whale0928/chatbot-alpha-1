@@ -3,6 +3,9 @@ name: release
 # git tag vX.Y.Z push 시 amd64 이미지 빌드 → Zot push.
 # ArgoCD Image Updater(default-updater)가 새 semver 태그 감지 후 자동으로
 # Application의 newTag를 갱신하므로 별도 sync trigger 불필요.
+#
+# Zot은 OCI image index가 아닌 단일 image manifest만 받으므로 buildx 대신
+# docker build/push를 직접 호출. ubuntu-latest는 amd64 native라 cross-build 불요.
 on:
   push:
     tags:
@@ -35,9 +38,6 @@ jobs:
             echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Login to Zot
         uses: docker/login-action@v3
         with:
@@ -45,24 +45,17 @@ jobs:
           username: ${{ secrets.ZOT_USERNAME }}
           password: ${{ secrets.ZOT_PASSWORD }}
 
-      - name: Build & push (amd64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64
-          push: true
-          # Zot은 단일 OCI manifest만 허용 — provenance/sbom attestation을 비활성화해
-          # manifest list가 아닌 단일 image manifest로 push.
-          provenance: false
-          sbom: false
-          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.value }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.tag.outputs.value }}
+      - name: Build
+        run: |
+          docker build \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=${{ steps.tag.outputs.value }}" \
+            -t "${IMAGE}:${{ steps.tag.outputs.value }}" \
+            .
+
+      - name: Push
+        run: docker push "${IMAGE}:${{ steps.tag.outputs.value }}"
 
       - name: Summary
         run: |
