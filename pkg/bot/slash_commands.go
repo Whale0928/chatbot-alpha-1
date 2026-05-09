@@ -31,7 +31,7 @@ var slashCommands = []*discordgo.ApplicationCommand{
 	},
 	{
 		Name:        "agent",
-		Description: "에이전트: 4 레포 데이터 + 자연어 지시",
+		Description: "에이전트: 등록 레포 데이터 + 자연어 지시",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionString,

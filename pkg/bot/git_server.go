@@ -18,10 +18,14 @@ type WeeklyRepo struct {
 }
 
 // weeklyRepos는 [주간 정리]에서 노출할 레포 목록.
-// 보틀노트 3개 (워크스페이스 / API / FE) + 개인 인프라(k8s-platform).
+// 보틀노트 4개 (워크스페이스 / 백엔드 / 프론트엔드 / 어드민) + 개인 인프라(k8s-platform).
+//
+// 라벨은 한글 통일 — 디스코드 봇 운영 톤이 한국어이므로 버튼 라벨도 한국어로 맞춘다.
+// 5개를 한 row에 노출하기 위해 가장 긴 라벨도 8자 이내로 유지 (Discord 한 줄 5버튼 한도 + 80자 한도).
 var weeklyRepos = []WeeklyRepo{
 	{Owner: "bottle-note", Name: "workspace", Label: "워크스페이스"},
-	{Owner: "bottle-note", Name: "bottle-note-api-server", Label: "API 서버"},
+	{Owner: "bottle-note", Name: "bottle-note-api-server", Label: "백엔드"},
 	{Owner: "bottle-note", Name: "bottle-note-frontend", Label: "프론트엔드"},
-	{Owner: "Whale0928", Name: "k8s-platform", Label: "k8s-platform"},
+	{Owner: "bottle-note", Name: "admin-dashboard", Label: "어드민 대시보드"},
+	{Owner: "Whale0928", Name: "k8s-platform", Label: "k8s 플랫폼"},
 }

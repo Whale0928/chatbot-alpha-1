@@ -21,7 +21,7 @@ import (
 // 흐름:
 //   [에이전트] 클릭 → handleAgent → StateAgentAwaitInput
 //     → 사용자 자유 텍스트 → handleAgentMessage
-//       → 4 레포 병렬 fetch (open 이슈 + 14일 커밋)
+//       → 등록 레포 병렬 fetch (open 이슈 + 14일 커밋)
 //       → summarize.Agent 호출 → 결과 전송 + [처음 메뉴]
 //
 // 데이터 dump 크기 부담은 토큰 비용으로 부메랑이지만, 의도 분류 1단계 없이도
@@ -73,7 +73,7 @@ func handleAgentMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess *
 	runAgentInstruction(s, sess, content, m.Author.Username)
 }
 
-// runAgentInstruction은 4 레포 fetch + LLM 호출 + 응답을 수행한다.
+// runAgentInstruction은 등록 레포 전체 fetch + LLM 호출 + 응답을 수행한다.
 // 진입점:
 //   - handleAgentMessage (사용자 텍스트 입력)
 //   - handleSlashCommand /agent instruction:... (슬래시 즉시 실행)
@@ -106,7 +106,7 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 	}
 	log.Printf("[agent/fetch] ok repos=%d issues=%d commits=%d", len(repos), totalIssues, totalCommits)
 
-	s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("이슈 %d건 + 커밋 %d건 (4 레포)을 분석하는 중...", totalIssues, totalCommits))
+	s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("이슈 %d건 + 커밋 %d건 (%d 레포)을 분석하는 중...", totalIssues, totalCommits, len(repos)))
 
 	llmCtx, llmCancel := context.WithTimeout(context.Background(), agentLLMTimeout)
 	defer llmCancel()
