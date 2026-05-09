@@ -52,7 +52,8 @@ func handleAgent(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Ses
 			"예) `취소` 입력 시 에이전트 종료")
 }
 
-// handleAgentMessage는 사용자 자유 텍스트를 받아 4 레포 fetch + LLM 호출 → 답변.
+// handleAgentMessage는 사용자 자유 텍스트를 받아 검증 + cancel 처리 후 runAgentInstruction에 위임한다.
+// 슬래시 /agent instruction:... 직접 실행 흐름과 공통 본체를 공유하기 위해 분리되어 있다.
 func handleAgentMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess *Session) {
 	content := strings.TrimSpace(m.Content)
 	sess.UpdatedAt = time.Now()
@@ -69,18 +70,32 @@ func handleAgentMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess *
 		})
 		return
 	}
+	runAgentInstruction(s, sess, content, m.Author.Username)
+}
 
+// runAgentInstruction은 4 레포 fetch + LLM 호출 + 응답을 수행한다.
+// 진입점:
+//   - handleAgentMessage (사용자 텍스트 입력)
+//   - handleSlashCommand /agent instruction:... (슬래시 즉시 실행)
+//
+// content는 사전에 trim/검증된 비어있지 않은 지시문이어야 한다.
+// authorName은 로그용 (없으면 "system"). 함수 종료 시 sess.State는 항상 StateSelectMode로 복원된다.
+func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorName string) {
+	if authorName == "" {
+		authorName = "system"
+	}
+	sess.UpdatedAt = time.Now()
 	log.Printf("[agent/request] thread=%s by=%s runes=%d preview=%q",
-		sess.ThreadID, m.Author.Username, len([]rune(content)), truncate(content, 80))
+		sess.ThreadID, authorName, len([]rune(content)), truncate(content, 80))
 
-	s.ChannelMessageSend(m.ChannelID, "데이터 수집 중...")
+	s.ChannelMessageSend(sess.ThreadID, "데이터 수집 중...")
 
 	ghCtx, ghCancel := context.WithTimeout(context.Background(), agentGitHubTimeout)
 	defer ghCancel()
 	repos, err := fetchAgentContext(ghCtx)
 	if err != nil {
 		log.Printf("[agent/fetch] ERR: %v", err)
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("데이터 수집 실패: %v", err))
+		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("데이터 수집 실패: %v", err))
 		sess.State = StateSelectMode
 		return
 	}
@@ -91,7 +106,7 @@ func handleAgentMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess *
 	}
 	log.Printf("[agent/fetch] ok repos=%d issues=%d commits=%d", len(repos), totalIssues, totalCommits)
 
-	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("이슈 %d건 + 커밋 %d건 (4 레포)을 분석하는 중...", totalIssues, totalCommits))
+	s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("이슈 %d건 + 커밋 %d건 (4 레포)을 분석하는 중...", totalIssues, totalCommits))
 
 	llmCtx, llmCancel := context.WithTimeout(context.Background(), agentLLMTimeout)
 	defer llmCancel()
@@ -100,7 +115,7 @@ func handleAgentMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess *
 	dur := time.Since(start)
 	if err != nil {
 		log.Printf("[agent/llm] ERR elapsed=%s err=%v", dur, err)
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("LLM 분석 실패: %v", err))
+		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("LLM 분석 실패: %v", err))
 		sess.State = StateSelectMode
 		return
 	}
@@ -110,10 +125,10 @@ func handleAgentMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess *
 	if rendered == "" {
 		rendered = "_(답변 본문이 비어있습니다)_"
 	}
-	if err := sendLongMessage(s, m.ChannelID, rendered); err != nil {
+	if err := sendLongMessage(s, sess.ThreadID, rendered); err != nil {
 		log.Printf("[agent/send] ERR: %v", err)
 	}
-	if _, err := s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
+	if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
 		Content: "이어서 다른 작업을 시작하려면 [처음 메뉴]를 눌러주세요.",
 		Components: []discordgo.MessageComponent{
 			discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}},

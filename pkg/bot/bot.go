@@ -143,7 +143,7 @@ func Run(envFile string) error {
 	}
 	llmClient = c
 	summarizer = llmSummarizer{c: c}
-	log.Println("LLM 클라이언트 초기화 완료 (gpt-5.4-mini + reasoning=low)")
+	log.Println("LLM 클라이언트 초기화 완료 (gpt-5.5 + reasoning=medium)")
 
 	// GitHub 클라이언트는 GITHUB_TOKEN이 있을 때만 활성화. 없으면 주간 정리는 비활성화 안내만.
 	githubOrg = os.Getenv("GITHUB_ORG")
@@ -174,6 +174,13 @@ func Run(envFile string) error {
 		return fmt.Errorf("Discord 연결 실패: %w", err)
 	}
 	defer s.Close()
+
+	// 슬래시 명령어 등록은 Open 직후 (s.State.User.ID 채워진 뒤). guildID 비면 글로벌(전파 1h),
+	// 비어있지 않으면 해당 길드에 즉시 반영. 동일 이름은 덮어쓰므로 cleanup 불필요.
+	guildID := os.Getenv("DISCORD_GUILD_ID")
+	if err := registerSlashCommands(s, guildID); err != nil {
+		return fmt.Errorf("슬래시 명령어 등록 실패: %w", err)
+	}
 
 	go cleanupSessions()
 

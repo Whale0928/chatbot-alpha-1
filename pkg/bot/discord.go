@@ -51,9 +51,17 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	openThread(s, m, content)
 }
 
-// interactionCreate: 버튼 클릭 처리
+// interactionCreate: 슬래시 명령어 + 버튼 클릭 처리.
+// ApplicationCommand는 채널에서 호출되어 스레드를 새로 생성하고,
+// MessageComponent는 이미 존재하는 스레드 안의 세션 버튼 흐름을 처리한다.
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionMessageComponent {
+	switch i.Type {
+	case discordgo.InteractionApplicationCommand:
+		handleSlashCommand(s, i)
+		return
+	case discordgo.InteractionMessageComponent:
+		// 아래 기존 버튼 처리 흐름으로 진행
+	default:
 		return
 	}
 

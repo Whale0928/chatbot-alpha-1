@@ -19,7 +19,7 @@ chatbot-alpha-1은 소규모 팀의 일상적인 운영 부담 — 매주 회의
 | | |
 |---|---|
 | **대상** | GitHub + Discord를 함께 쓰는 5–20인 규모 엔지니어링 팀 |
-| **스택** | Go 1.25 / discordgo / OpenAI Structured Output (`gpt-5.4-mini`) / Cobra CLI |
+| **스택** | Go 1.25 / discordgo / OpenAI Structured Output (`gpt-5.5`, reasoning=medium) / Cobra CLI |
 | **배포** | distroless Docker 이미지 + Argo CD + Kustomize + SOPS |
 
 ---
@@ -31,6 +31,7 @@ chatbot-alpha-1은 소규모 팀의 일상적인 운영 부담 — 매주 회의
 chatbot-alpha-1은 다음을 다르게 한다.
 
 - **단일 스레드 워크플로우** — 미팅 finalize → 주간 분석 → 분석 결과를 미팅 첫 노트로 주입 → 다시 미팅. 도구 간 컨텍스트 스위치가 없다.
+- **슬래시 명령어로 즉시 시작** — `/meeting` 한 번에 미팅 모드, `/agent instruction:...` 한 번에 자연어 분석. @멘션 → 메뉴 → 버튼 다단계를 스킵한다.
 - **환각을 신뢰하지 않는 설계** — 모든 응답을 원본 노트와 substring/토큰 겹침으로 1차 검증한다. "이슈 닫기" 같은 비가역 액션은 LLM 추천을 그대로 실행하지 않고 별도 schema 필드로 ground truth를 따로 받아 사용자 확인 prompt를 거친다.
 - **4 포맷 + 자연어 directive** — 같은 회의 데이터를 결정+진행 / 논의 / 역할별 / 자율 4가지 관점으로 정리할 수 있고, "프론트/백엔드/기획 H3 섹션으로 묶어줘" 같은 한 줄 지시로 스타일을 추가 변형할 수 있다.
 - **디스코드 없이 검증 가능** — `llm-bot` / `git-bot` 서브커맨드로 stdout에서 LLM·GitHub 파이프라인을 직접 돌려 골든 비교한다. 프롬프트 튜닝과 회귀 검증이 봇을 띄우는 절차 없이 가능하다.
@@ -79,6 +80,18 @@ chatbot-alpha-1은 다음을 다르게 한다.
 ### 5. 세션 연결
 미팅 finalize, 주간 분석, 에이전트 답변 — 어떤 작업이 끝나도 세션은 유지되고 [처음 메뉴]로 같은 스레드에서 다음 작업으로 이어간다.
 
+### 6. 슬래시 명령어
+@멘션 + 메뉴 트리를 스킵하고 채널에서 한 번에 진입한다.
+
+| 명령어 | 옵션 | 동작 |
+|---|---|---|
+| `/meeting` | – | 스레드 생성 → 즉시 미팅 모드 + sticky 컨트롤 |
+| `/weekly` | – | 스레드 생성 → 주간 정리 레포 선택 버튼 |
+| `/agent` | `instruction` (선택) | 옵션 있으면 즉시 4 레포 fetch + LLM 실행, 없으면 입력 대기 |
+| `/session` | – | @멘션과 동일한 빈 세션 + 4버튼 메뉴 |
+
+호출 시 채널에 ephemeral 응답으로 스레드 링크가 안내되고, 본 흐름은 새로 만들어진 스레드 안에서 진행된다. 이미 세션이 있는 스레드 안에서 슬래시를 호출하면 중첩 방지로 거부된다.
+
 ---
 
 ## Installation
@@ -86,6 +99,7 @@ chatbot-alpha-1은 다음을 다르게 한다.
 ### 요구사항
 - Go **1.25** 이상
 - Discord 봇 토큰 (Discord Developer Portal에서 생성)
+- 봇 OAuth scope에 **`bot` + `applications.commands`** 포함 (슬래시 명령어를 쓰려면 후자 필수)
 - OpenAI API 키
 - GitHub Personal Access Token (`repo` 권한)
 
@@ -99,6 +113,8 @@ chatbot-alpha-1은 다음을 다르게 한다.
 | `GITHUB_TOKEN` | O | GitHub PAT (`repo` 권한) |
 | `GITHUB_ORG` | O | 기본 GitHub org |
 | `GITHUB_REPO` | O | 기본 GitHub repo |
+| `DISCORD_GUILD_ID` | – | 비우면 슬래시 명령어를 글로벌 등록 (전파 최대 1h). 개발 중에는 길드 ID를 넣어 즉시 반영. |
+| `BOT_CHANNEL_ID` | – | 지정하면 해당 채널에서는 @멘션 없이도 메시지에 반응 |
 
 ```env
 DISCORD_BOT_TOKEN=<your_discord_bot_token>
@@ -106,6 +122,9 @@ GPT_API_KEY=<your_openai_api_key>
 GITHUB_TOKEN=<your_github_pat>
 GITHUB_ORG=<your_org>
 GITHUB_REPO=<your_default_repo>
+# 선택
+DISCORD_GUILD_ID=<your_dev_guild_id>
+BOT_CHANNEL_ID=<your_dedicated_channel_id>
 ```
 
 ### 2. 로컬 실행

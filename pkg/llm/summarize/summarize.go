@@ -31,12 +31,22 @@ var (
 )
 
 // meetingModel은 미팅 요약에 사용하는 OpenAI 모델.
-// gpt-5.4-mini는 reasoning 기반 모델이라 temperature를 받지 않는다.
-// 결정성은 reasoning_effort로 제어한다.
-const meetingModel = openai.ChatModelGPT5_4Mini
+// gpt-5.5는 GPT-5.5 정식 모델 ID (snapshot: gpt-5.5-2026-04-23).
+//
+// chat-latest alias 시도 이력: "gpt-5.5-chat-latest"는 2026-05-09 시점 API에서
+// 404 model_not_found로 응답하여 정식 ID로 fallback. GPT-5.3까지는 chat-latest
+// alias가 존재했으나 GPT-5.5는 alias 없이 `gpt-5.5` 슬러그만 권장된다.
+//
+// reasoning 기반 모델이라 temperature를 받지 않는다. 결정성은 reasoning_effort로 제어한다.
+//
+// openai-go v3.35.0 시점에는 GPT-5.5 전용 SDK 상수가 아직 없어 문자열 캐스팅으로 지정한다.
+// 후속 SDK가 ChatModelGPT5_5를 추가하면 그 상수로 치환할 것.
+const meetingModel openai.ChatModel = "gpt-5.5"
 
-// meetingReasoning은 reasoning effort. "low"는 가벼운 추론 보조.
-var meetingReasoning = openai.ReasoningEffortLow
+// meetingReasoning은 reasoning effort. GPT-5.5의 권장 default인 medium으로 둬서
+// 환각 감소 효과(GPT-5.5가 GPT-5.3 대비 -52.5%)를 충분히 얻는다.
+// 비용/지연이 문제가 되면 low로 낮출 수 있고, 복잡한 운영 분석에서는 high도 고려.
+var meetingReasoning = openai.ReasoningEffortMedium
 
 // Meeting은 수집된 메모와 발화자 목록을 받아 LLM을 호출하고
 // 구조화된 llm.FinalNoteResponse를 반환한다 (legacy v1.4 포맷).
