@@ -105,14 +105,11 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	case customIDWeeklyPeriodPromptBtn:
 		handleWeeklyPeriodPrompt(s, i, sess)
 		return
-	case customIDWeeklyPeriod7:
-		handleWeeklyPeriod(s, i, sess, 7)
+	case customIDWeeklyPeriodSelect:
+		handleWeeklyPeriodSelect(s, i, sess)
 		return
-	case customIDWeeklyPeriod14:
-		handleWeeklyPeriod(s, i, sess, 14)
-		return
-	case customIDWeeklyPeriodCalendar:
-		handleWeeklyPeriodCalendar(s, i, sess)
+	case customIDWeeklyPeriodConfirm:
+		handleWeeklyPeriodConfirm(s, i, sess)
 		return
 	case customIDWeeklyRetryBtn:
 		handleWeeklyRetry(s, i, sess)

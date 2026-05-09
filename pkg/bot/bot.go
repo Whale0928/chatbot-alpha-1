@@ -89,16 +89,21 @@ type Session struct {
 	LastWeeklyResponse  *llm.WeeklyReportResponse // [미팅 시작]에서 첫 노트로 주입
 	LastWeeklyCloseable []llm.ClosableIssue       // [닫기] 액션의 ground truth — confirm/실행 시점에 LLM 재호출 없이 사용
 
-	// PendingWeeklyRepo / PendingWeeklyScope는 첫 분석 흐름에서 단계별로 박제되는 임시 컨텍스트.
+	// PendingWeeklyRepo / PendingWeeklyScope / PendingPeriodDays는 첫 분석 흐름에서
+	// 단계별로 박제되는 임시 컨텍스트.
+	//
 	// 흐름:
-	//   레포 클릭         → PendingWeeklyRepo  세팅, scope 선택 prompt 노출
-	//   scope=Issues      → 즉시 분석 (기간 무관) — Pending 비움
-	//   scope=Commits/Both → PendingWeeklyScope 세팅, 기간 선택 prompt 노출
-	//   기간 클릭/모달   → 분석 실행 + Pending 비움 + LastWeekly* 박제
+	//   레포 클릭          → PendingWeeklyRepo
+	//   scope=Issues       → 즉시 분석 (기간 무관) — Pending 비움
+	//   scope=Commits/Both → PendingWeeklyScope, 기간 선택 prompt 노출 (드롭다운 + [확인])
+	//   드롭다운 일자 선택  → PendingPeriodDays 갱신 + 메시지 update
+	//   드롭다운 "직접 입력" → modal → 즉시 분석 (Pending 비움)
+	//   [확인] 클릭         → PendingPeriodDays(없으면 default 7)로 분석 + Pending 비움
 	//
 	// follow-up [기간 변경]은 PendingWeeklyRepo가 비어 있으므로 LastWeekly* 컨텍스트로 fallback.
 	PendingWeeklyRepo  string
 	PendingWeeklyScope llm.WeeklyScope
+	PendingPeriodDays  int
 
 	// LastBotSummary는 같은 스레드에서 직전에 봇이 전송한 마크다운 결과.
 	// weekly 분석 markdown / 미팅 finalize markdown이 채운다.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,11 +41,10 @@ const (
 	customIDWeeklyRepoPrefix      = "weekly_repo:"  // 레포 클릭 — owner/name
 	customIDWeeklyScopePrefix     = "weekly_scope:" // scope 클릭 — issues/commits/both
 	customIDWeeklyDirectiveBtn    = "weekly_directive"
-	customIDWeeklyPeriodPromptBtn = "weekly_period_prompt"     // [기간 변경] 클릭 — [1주][2주][캘린더] sub-prompt
-	customIDWeeklyPeriod7         = "weekly_period_7"          // 7일(1주) 즉시 재분석
-	customIDWeeklyPeriod14        = "weekly_period_14"         // 14일(2주) 즉시 재분석
-	customIDWeeklyPeriodCalendar  = "weekly_period_calendar"   // [캘린더] — modal 발사
-	customIDWeeklyPeriodModal     = "weekly_period_modal"      // modal submit custom_id
+	customIDWeeklyPeriodPromptBtn = "weekly_period_prompt"     // [기간 변경] 클릭 — 드롭다운 + [확인] sub-prompt
+	customIDWeeklyPeriodSelect    = "weekly_period_select"     // StringSelect — 일자 옵션 선택
+	customIDWeeklyPeriodConfirm   = "weekly_period_confirm"    // [확인] — 선택된 일자로 분석 실행
+	customIDWeeklyPeriodModal     = "weekly_period_modal"      // 직접 입력 modal submit custom_id
 	customIDWeeklyPeriodModalDate = "weekly_period_modal_date" // modal text input field id
 	customIDWeeklyRetryBtn        = "weekly_retry"
 	customIDWeeklyToMeetingBtn    = "weekly_to_meeting"
@@ -53,9 +53,17 @@ const (
 	customIDHomeBtn               = "mode_home"
 )
 
-// weeklyMaxCustomDays는 [캘린더]로 지정 가능한 시작일의 최대 과거 일수.
+// 드롭다운 옵션 value. weeklyPeriodValueCustom은 "직접 입력" — modal 발사로 분기.
+// 그 외 일자는 strconv.Atoi로 파싱 가능한 숫자 문자열.
+const weeklyPeriodValueCustom = "custom"
+
+// weeklyMaxCustomDays는 [직접 입력]으로 지정 가능한 시작일의 최대 과거 일수.
 // 30일 초과 시작일은 분석 토큰량/품질 양쪽에 부담이 커서 거부한다.
 const weeklyMaxCustomDays = 30
+
+// weeklyPeriodDefaultDays는 드롭다운 placeholder + [확인] 클릭 시 사용자가 옵션을 한 번도
+// 안 골랐을 때의 기본 일자. 운영에서 가장 자주 보는 "지난 1주" 시나리오로 설정.
+const weeklyPeriodDefaultDays = 7
 
 // sendWeeklyRepoButtons는 [주간 정리] 클릭 시 weeklyRepos를 5개씩 ActionsRow로 분할하여
 // 직접 버튼으로 노출한다 (그룹 navigation 없음).
@@ -144,20 +152,20 @@ func handleWeeklyScopeSelect(s *discordgo.Session, i *discordgo.InteractionCreat
 
 	if scope == llm.WeeklyScopeIssues {
 		// 이슈 전용은 기간 선택 없이 즉시 분석 — Pending 컨텍스트 정리.
-		sess.PendingWeeklyRepo = ""
-		sess.PendingWeeklyScope = 0
+		clearPendingWeekly(sess)
 		respondInteraction(s, i, fmt.Sprintf("`%s` %s 분석 중...", fullName, scopeAckLabel(scope)))
 		now := time.Now()
 		runWeeklyAnalyze(s, sess, fullName, now.Add(-commitWindow), now, "", scope)
 		return
 	}
 
-	// commits / both: 기간 선택 prompt 노출. PendingWeeklyScope 박제.
+	// commits / both: 기간 선택 prompt 노출 (드롭다운 + [확인]). PendingWeeklyScope 박제, days는 0(default 7).
 	sess.PendingWeeklyScope = scope
+	sess.PendingPeriodDays = 0
 	respondInteractionWithComponents(s, i,
-		fmt.Sprintf("`%s` %s — 어느 기간으로 분석할까요? (캘린더는 최대 %d일 이내 임의 시작일)",
-			fullName, scopeAckLabel(scope), weeklyMaxCustomDays),
-		weeklyPeriodPromptComponents(),
+		fmt.Sprintf("`%s` %s — 분석할 기간을 고르고 [확인]을 눌러주세요. (기본값: 지난 %d일)",
+			fullName, scopeAckLabel(scope), weeklyPeriodDefaultDays),
+		weeklyPeriodPromptComponents(0),
 	)
 }
 
@@ -391,29 +399,9 @@ func handleWeeklyAwaitDirectiveMessage(s *discordgo.Session, m *discordgo.Messag
 	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, now.Add(-commitWindow), now, content, sess.LastWeeklyScope)
 }
 
-// handleWeeklyPeriod는 [1주] / [2주] sub-button 클릭 시 즉시 분석한다.
-// 첫 분석 흐름(PendingWeeklyRepo 세팅 상태)과 follow-up [기간 변경] 흐름 양쪽에서 호출되며,
-// resolveWeeklyPeriodContext가 적절한 (repo, scope, directive) 컨텍스트를 선택한다.
-func handleWeeklyPeriod(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session, days int) {
-	repo, scope, directive, ok := resolveWeeklyPeriodContext(sess)
-	if !ok {
-		respondInteraction(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
-		return
-	}
-	if !scope.IncludesCommits() {
-		respondInteraction(s, i, "이슈 전용 분석에는 기간 변경이 적용되지 않습니다.")
-		return
-	}
-	clearPendingWeekly(sess)
-	respondInteraction(s, i, fmt.Sprintf("`%s` 레포를 지난 %d일로 분석합니다.", repo, days))
-	now := time.Now()
-	since := now.Add(-time.Duration(days) * 24 * time.Hour)
-	runWeeklyAnalyze(s, sess, repo, since, now, directive, scope)
-}
-
-// handleWeeklyPeriodPrompt는 follow-up [기간 변경] 클릭 시 [1주][2주][📅 캘린더] sub-prompt를 띄운다.
+// handleWeeklyPeriodPrompt는 follow-up [기간 변경] 클릭 시 드롭다운 + [확인] sub-prompt를 띄운다.
 // 첫 분석 흐름의 prompt는 handleWeeklyScopeSelect에서 직접 발사하므로 여기는 follow-up 전용 진입점.
-// [캘린더]는 클릭 시 modal로 사용자가 임의 시작일(YYYY-MM-DD, 30일 이내)을 직접 지정한다.
+// 드롭다운에서 "직접 입력"을 고르면 modal로 사용자가 임의 시작일(YYYY-MM-DD, 30일 이내)을 지정한다.
 func handleWeeklyPeriodPrompt(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
 	if sess.LastWeeklyRepo == "" {
 		respondInteraction(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
@@ -424,27 +412,118 @@ func handleWeeklyPeriodPrompt(s *discordgo.Session, i *discordgo.InteractionCrea
 		return
 	}
 	respondInteractionWithComponents(s, i,
-		fmt.Sprintf("어느 기간으로 다시 분석할까요? (캘린더는 최대 %d일 이내 임의 시작일)", weeklyMaxCustomDays),
-		weeklyPeriodPromptComponents(),
+		fmt.Sprintf("어느 기간으로 다시 분석할까요? (기본값: 지난 %d일)", weeklyPeriodDefaultDays),
+		weeklyPeriodPromptComponents(sess.PendingPeriodDays),
 	)
 }
 
-// weeklyPeriodPromptComponents는 [1주][2주][📅 캘린더][처음 메뉴] 버튼 행을 만든다.
-// 첫 분석(scope=Commits/Both 직후) + follow-up [기간 변경] 두 흐름에서 동일 행을 재사용한다.
-func weeklyPeriodPromptComponents() []discordgo.MessageComponent {
+// weeklyPeriodPromptComponents는 [드롭다운][확인][처음 메뉴] 두 row를 만든다.
+// 첫 분석 + follow-up 두 흐름에서 재사용된다. currentDays는 드롭다운에서 어느 옵션을 default로
+// 표시할지 결정 — 0 또는 음수면 weeklyPeriodDefaultDays(7)로 fallback.
+func weeklyPeriodPromptComponents(currentDays int) []discordgo.MessageComponent {
+	if currentDays <= 0 {
+		currentDays = weeklyPeriodDefaultDays
+	}
+	options := []discordgo.SelectMenuOption{
+		{Label: "지난 3일", Value: "3", Default: currentDays == 3},
+		{Label: "지난 7일", Value: "7", Default: currentDays == 7},
+		{Label: "지난 14일", Value: "14", Default: currentDays == 14},
+		{Label: "지난 21일", Value: "21", Default: currentDays == 21},
+		{Label: "지난 30일", Value: "30", Default: currentDays == 30},
+		{
+			Label:       "직접 입력",
+			Value:       weeklyPeriodValueCustom,
+			Description: fmt.Sprintf("임의 시작일 (YYYY-MM-DD, 최대 %d일 이내)", weeklyMaxCustomDays),
+			Emoji:       &discordgo.ComponentEmoji{Name: "✏️"},
+		},
+	}
 	return []discordgo.MessageComponent{
 		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-			discordgo.Button{Label: "1주", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyPeriod7},
-			discordgo.Button{Label: "2주", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyPeriod14},
+			discordgo.SelectMenu{
+				MenuType:    discordgo.StringSelectMenu,
+				CustomID:    customIDWeeklyPeriodSelect,
+				Placeholder: fmt.Sprintf("지난 %d일", currentDays),
+				Options:     options,
+			},
+		}},
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{
-				Label:    "캘린더",
-				Style:    discordgo.PrimaryButton,
-				CustomID: customIDWeeklyPeriodCalendar,
-				Emoji:    &discordgo.ComponentEmoji{Name: "📅"},
+				Label:    "확인",
+				Style:    discordgo.SuccessButton,
+				CustomID: customIDWeeklyPeriodConfirm,
 			},
 			homeButton(),
 		}},
 	}
+}
+
+// handleWeeklyPeriodSelect는 드롭다운에서 옵션 선택 시 호출된다.
+//   - "직접 입력" → modal 발사 (handleWeeklyPeriodCalendar 재사용)
+//   - 일자 옵션  → sess.PendingPeriodDays 박제 + UpdateMessage로 default 옵션 갱신
+//
+// [확인] 버튼이 별도로 있으니 여기서 분석을 발사하지 않는다.
+func handleWeeklyPeriodSelect(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
+	_, scope, _, ok := resolveWeeklyPeriodContext(sess)
+	if !ok {
+		respondInteractionEphemeral(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
+		return
+	}
+	if !scope.IncludesCommits() {
+		respondInteractionEphemeral(s, i, "이슈 전용 분석에는 기간 선택이 적용되지 않습니다.")
+		return
+	}
+	data := i.MessageComponentData()
+	if len(data.Values) == 0 {
+		respondInteractionEphemeral(s, i, "선택값이 비어 있습니다.")
+		return
+	}
+	val := data.Values[0]
+	if val == weeklyPeriodValueCustom {
+		// "직접 입력" → modal 발사. PendingPeriodDays는 비워둠 — modal submit이 즉시 분석하므로
+		// [확인] 버튼 흐름에 의존하지 않는다.
+		handleWeeklyPeriodCalendar(s, i, sess)
+		return
+	}
+	days, err := strconv.Atoi(val)
+	if err != nil || days < 1 || days > weeklyMaxCustomDays {
+		respondInteractionEphemeral(s, i, fmt.Sprintf("지원하지 않는 기간 값입니다: %q", val))
+		return
+	}
+	sess.PendingPeriodDays = days
+
+	// UpdateMessage로 같은 메시지의 컴포넌트만 교체 — 사용자가 본 default 옵션이 그대로 유지된다.
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:    fmt.Sprintf("선택: 지난 **%d일**. [확인]을 눌러 분석을 시작하세요.", days),
+			Components: weeklyPeriodPromptComponents(days),
+		},
+	}); err != nil {
+		log.Printf("[주간/period/select] ERR update: %v", err)
+	}
+}
+
+// handleWeeklyPeriodConfirm은 [확인] 버튼 클릭 시 sess.PendingPeriodDays(없으면 default 7)로 분석을 트리거한다.
+// 첫 분석/follow-up 양쪽에서 호출되며 컨텍스트는 resolveWeeklyPeriodContext가 결정.
+func handleWeeklyPeriodConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
+	repo, scope, directive, ok := resolveWeeklyPeriodContext(sess)
+	if !ok {
+		respondInteraction(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
+		return
+	}
+	if !scope.IncludesCommits() {
+		respondInteraction(s, i, "이슈 전용 분석에는 기간 변경이 적용되지 않습니다.")
+		return
+	}
+	days := sess.PendingPeriodDays
+	if days <= 0 {
+		days = weeklyPeriodDefaultDays
+	}
+	clearPendingWeekly(sess)
+	respondInteraction(s, i, fmt.Sprintf("`%s` 레포를 지난 %d일로 분석합니다.", repo, days))
+	now := time.Now()
+	since := now.Add(-time.Duration(days) * 24 * time.Hour)
+	runWeeklyAnalyze(s, sess, repo, since, now, directive, scope)
 }
 
 // resolveWeeklyPeriodContext는 기간 핸들러가 사용할 (repo, scope, directive)를 결정한다.
@@ -468,6 +547,7 @@ func resolveWeeklyPeriodContext(sess *Session) (repo string, scope llm.WeeklySco
 func clearPendingWeekly(sess *Session) {
 	sess.PendingWeeklyRepo = ""
 	sess.PendingWeeklyScope = 0
+	sess.PendingPeriodDays = 0
 }
 
 // handleWeeklyPeriodCalendar는 [캘린더] 버튼 클릭 시 modal을 띄워 임의 시작일을 입력 받는다.
