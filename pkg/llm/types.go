@@ -160,6 +160,61 @@ type FreeformResponse struct {
 	Markdown string `json:"markdown" jsonschema_description:"미팅 노트 본문 마크다운. H1 헤더와 참석자/태그 풋터는 포함하지 않는다 (Go가 주입). ## 헤딩부터 시작."`
 }
 
+// WeeklyScope는 주간 정리에서 어떤 데이터를 LLM에 dump할지 식별한다.
+//
+//	WeeklyScopeIssues  — 현재 OPEN 이슈만 (커밋 fetch 생략)
+//	WeeklyScopeCommits — 지난 N일 커밋만 (이슈 fetch 생략)
+//	WeeklyScopeBoth    — 둘 다 (기존 동작, 디폴트)
+//
+// scope에 따라 fetch가 분기되고, summarize.Weekly가 시스템 프롬프트에 scope를 명시해
+// LLM이 누락된 소스에 대한 추측이나 "(없음)" 같은 자리채움을 하지 않도록 한다.
+type WeeklyScope int
+
+const (
+	WeeklyScopeBoth WeeklyScope = iota
+	WeeklyScopeIssues
+	WeeklyScopeCommits
+)
+
+// String은 로그/CLI/프롬프트에 들어가는 문자열 표현.
+func (s WeeklyScope) String() string {
+	switch s {
+	case WeeklyScopeIssues:
+		return "issues"
+	case WeeklyScopeCommits:
+		return "commits"
+	case WeeklyScopeBoth:
+		return "both"
+	default:
+		return "unknown"
+	}
+}
+
+// ParseWeeklyScope는 CLI 플래그/customID 토큰을 WeeklyScope로 변환한다.
+// 알 수 없는 값이면 ok=false.
+func ParseWeeklyScope(s string) (WeeklyScope, bool) {
+	switch s {
+	case "issues":
+		return WeeklyScopeIssues, true
+	case "commits":
+		return WeeklyScopeCommits, true
+	case "both":
+		return WeeklyScopeBoth, true
+	default:
+		return 0, false
+	}
+}
+
+// IncludesIssues는 scope에 이슈 fetch가 포함되는지 반환한다.
+func (s WeeklyScope) IncludesIssues() bool {
+	return s == WeeklyScopeBoth || s == WeeklyScopeIssues
+}
+
+// IncludesCommits는 scope에 커밋 fetch가 포함되는지 반환한다.
+func (s WeeklyScope) IncludesCommits() bool {
+	return s == WeeklyScopeBoth || s == WeeklyScopeCommits
+}
+
 // ClosableIssue는 LLM이 "닫아도 될 것 같은 이슈"로 추천하는 단일 항목.
 // 이 목록은 [닫아도 될 이슈 N건 닫기] 버튼이 GitHub close API를 호출할 때 ground truth로 사용된다.
 //

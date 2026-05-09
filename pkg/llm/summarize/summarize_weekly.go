@@ -19,12 +19,14 @@ var weeklyReportSchema = llm.GenerateSchema[llm.WeeklyReportResponse]()
 // 토큰 절약 위해 짧게 자른다 — 50개 이슈 × 200 룬 ≒ 만 룬 정도.
 const weeklyBodyExcerptRunes = 200
 
-// Weekly는 단일 레포의 주간 이슈 + 커밋 dump를 LLM에게 보내 운영 진단 마크다운을 생성한다.
+// Weekly는 단일 레포의 주간 이슈/커밋 dump를 LLM에게 보내 운영 진단 마크다운을 생성한다.
+//
+// scope는 분석 범위. WeeklyScopeIssues면 commits는 빈 슬라이스로 전달되어야 하고
+// (호출자가 fetch를 생략한다), 마찬가지로 WeeklyScopeCommits면 issues가 빈 슬라이스다.
+// scope 정보는 user 메시지 상단에 "Analysis scope: ..." 라인으로 명시되어 LLM이
+// 누락된 데이터 소스에 대한 추측을 하지 않게 한다.
 //
 // repoFullName은 "owner/name" 형식. since/until은 user 메시지 헤더에만 들어간다.
-// issues는 ListIssues 결과 (PR 제외 권장).
-// commits는 ListCommits 결과 (그대로). 둘 중 하나가 비어도 OK — 워크스페이스는 이슈 위주,
-// BE/FE 레포는 커밋 위주라 비대칭 분포가 정상.
 // directive는 사용자 [추가 요청] 입력. 빈 문자열이면 미적용.
 func Weekly(
 	ctx context.Context,
@@ -34,8 +36,9 @@ func Weekly(
 	issues []github.Issue,
 	commits []github.Commit,
 	directive string,
+	scope llm.WeeklyScope,
 ) (*llm.WeeklyReportResponse, error) {
-	userMsg := buildWeeklyUserMessage(repoFullName, since, until, issues, commits, directive)
+	userMsg := buildWeeklyUserMessage(repoFullName, since, until, issues, commits, directive, scope)
 	raw, err := callMeetingFormat(ctx, c, "weekly", prompts.Weekly, userMsg, "weekly_report", weeklyReportSchema)
 	if err != nil {
 		return nil, err
@@ -54,17 +57,22 @@ const commitMessageFirstLineRunes = 200
 // buildWeeklyUserMessage는 LLM에게 줄 user 메시지를 구성한다.
 // 형식은 사람이 읽어도 자연스러운 텍스트 — JSON dump보다 LLM이 잘 받음.
 //
+// scope는 헤더의 "Analysis scope: ..." 라인으로 명시되고, 비포함 데이터 소스는 dump 자체가 생략된다.
+// 이렇게 해야 LLM이 "(없음)" 자리채움이나 비포함 소스에 대한 추측을 시도하지 않는다.
+//
 // directive가 비어있지 않으면 헤더 직후 "Reporting directive ..." 블록이 prepend되어
 // 시스템 프롬프트의 default 가이드를 보강한다 (스키마는 못 깨도록).
-//
-// issues / commits 둘 다 섹션이 들어간다. 한쪽이 비어도 다른 쪽으로 분석을 진행할 수 있도록
-// LLM에게 두 데이터 소스의 비대칭 분포가 정상임을 시스템 프롬프트가 가이드한다.
-func buildWeeklyUserMessage(repoFullName string, since, until time.Time, issues []github.Issue, commits []github.Commit, directive string) string {
+func buildWeeklyUserMessage(repoFullName string, since, until time.Time, issues []github.Issue, commits []github.Commit, directive string, scope llm.WeeklyScope) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Repository: %s\n", repoFullName)
-	fmt.Fprintf(&b, "Commit window: %s ~ %s\n",
-		since.UTC().Format("2006-01-02"), until.UTC().Format("2006-01-02"))
-	b.WriteString("Issue scope: all currently OPEN issues (no time window)\n")
+	fmt.Fprintf(&b, "Analysis scope: %s — %s\n", scope, scopeHumanHint(scope))
+	if scope.IncludesCommits() {
+		fmt.Fprintf(&b, "Commit window: %s ~ %s\n",
+			since.UTC().Format("2006-01-02"), until.UTC().Format("2006-01-02"))
+	}
+	if scope.IncludesIssues() {
+		b.WriteString("Issue scope: all currently OPEN issues (no time window)\n")
+	}
 
 	if d := strings.TrimSpace(directive); d != "" {
 		b.WriteString("\nReporting directive from the operator (priority over default style, but must not violate the schema):\n")
@@ -72,24 +80,40 @@ func buildWeeklyUserMessage(repoFullName string, since, until time.Time, issues 
 		b.WriteString("\n")
 	}
 
-	fmt.Fprintf(&b, "\nOpen issues (count=%d, sorted by latest activity):\n\n", len(issues))
-	if len(issues) == 0 {
-		b.WriteString("(no open issues)\n")
-	} else {
-		for _, it := range issues {
-			writeIssueBlock(&b, it)
+	if scope.IncludesIssues() {
+		fmt.Fprintf(&b, "\nOpen issues (count=%d, sorted by latest activity):\n\n", len(issues))
+		if len(issues) == 0 {
+			b.WriteString("(no open issues)\n")
+		} else {
+			for _, it := range issues {
+				writeIssueBlock(&b, it)
+			}
 		}
 	}
 
-	fmt.Fprintf(&b, "\nCommits in window (count=%d, newest first):\n\n", len(commits))
-	if len(commits) == 0 {
-		b.WriteString("(no commits in this window)\n")
-	} else {
-		for _, c := range commits {
-			writeCommitBlock(&b, c)
+	if scope.IncludesCommits() {
+		fmt.Fprintf(&b, "\nCommits in window (count=%d, newest first):\n\n", len(commits))
+		if len(commits) == 0 {
+			b.WriteString("(no commits in this window)\n")
+		} else {
+			for _, c := range commits {
+				writeCommitBlock(&b, c)
+			}
 		}
 	}
 	return b.String()
+}
+
+// scopeHumanHint는 LLM이 scope의 의미를 즉시 알 수 있도록 한 줄 안내를 만든다.
+func scopeHumanHint(scope llm.WeeklyScope) string {
+	switch scope {
+	case llm.WeeklyScopeIssues:
+		return "issues only (commit dump intentionally omitted; do not infer commit-side activity)"
+	case llm.WeeklyScopeCommits:
+		return "commits only (issue dump intentionally omitted; do not infer issue-side state)"
+	default:
+		return "issues + commits (full operational diagnostic)"
+	}
 }
 
 // writeCommitBlock은 단일 커밋을 한 줄로 dump한다.

@@ -81,12 +81,18 @@ type Session struct {
 	// 마지막으로 수행한 주간 분석을 기억해 [다시 분석] / [추가 요청] / [기간 변경]
 	// 같은 follow-up 버튼이 같은 레포·기간으로 재호출하거나 directive를 덮어쓸 수 있게 한다.
 	// nil/zero 값은 "직전 주간 분석이 없음"을 의미.
-	LastWeeklyRepo      string                       // "owner/name"
-	LastWeeklySince     time.Time                    // 분석 시점 since
-	LastWeeklyUntil     time.Time                    // 분석 시점 until
+	LastWeeklyRepo      string                    // "owner/name"
+	LastWeeklySince     time.Time                 // 분석 시점 since
+	LastWeeklyUntil     time.Time                 // 분석 시점 until
 	LastWeeklyDirective string                    // 직전 directive (재분석 시 그대로 사용)
+	LastWeeklyScope     llm.WeeklyScope           // 직전 분석 범위 (이슈/커밋/전체) — 재분석 시 유지
 	LastWeeklyResponse  *llm.WeeklyReportResponse // [미팅 시작]에서 첫 노트로 주입
 	LastWeeklyCloseable []llm.ClosableIssue       // [닫기] 액션의 ground truth — confirm/실행 시점에 LLM 재호출 없이 사용
+
+	// PendingWeeklyRepo는 사용자가 [주간 정리]에서 레포를 선택한 직후, scope 버튼을 누르기
+	// 전까지 임시 박제되는 fullName. scope 버튼 클릭 시 이 값을 꺼내 runWeeklyAnalyze에 전달한다.
+	// scope 선택 prompt가 노출되는 짧은 윈도우에서만 의미 있고, 분석이 실행되면 LastWeekly* 로 옮겨진다.
+	PendingWeeklyRepo string
 
 	// LastBotSummary는 같은 스레드에서 직전에 봇이 전송한 마크다운 결과.
 	// weekly 분석 markdown / 미팅 finalize markdown이 채운다.

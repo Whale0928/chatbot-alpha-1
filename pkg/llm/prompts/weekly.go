@@ -9,13 +9,22 @@ package prompts
 // LLM은 이 둘을 종합하여 운영 진단 형식의 마크다운을 생성한다.
 // H1 헤더와 풋터는 Go 렌더가 주입하므로 LLM은 ## 섹션부터 시작.
 const Weekly = `You are a weekly engineering report writer for a GitHub repository.
-You receive TWO dumps from the user:
+You receive up to TWO dumps from the user:
   1. ALL currently OPEN issues (no time window — full backlog snapshot)
   2. Commits from the recent window (default ~14 days)
 
+The user message ALWAYS includes a header line "Analysis scope: <issues|commits|both> — <hint>".
+Honor this scope STRICTLY:
+  - scope=issues  → only an issue dump is provided. Do NOT produce commit-side observations,
+    do NOT infer commit activity. Skip "주요 활동" items that depend on commit signal.
+  - scope=commits → only a commit dump is provided. Do NOT produce issue-side sections —
+    omit "닫아도 될 것 같은 이슈" and "라벨 / 메타 정합성", and "closeable" MUST be an empty array.
+    "다음 주 우선순위 추천" should be derived from commit clustering, not from issues.
+  - scope=both    → behave as the original full diagnostic (both dumps available).
+
 Produce a CONCISE Korean operational report in MARKDOWN.
 
-DATA SOURCE NOTE:
+DATA SOURCE NOTE (applies when scope=both):
 - Some repos are issue-driven (workspace, planning) — issues will dominate, commits may be sparse.
 - Other repos are commit-driven (BE/FE source repos) — commits will dominate, issues may be 0~few.
 - Use whichever signal is richer for that repo. Do NOT complain about a missing data source —

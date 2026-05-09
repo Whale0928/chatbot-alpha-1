@@ -37,7 +37,8 @@ const weeklyGitHubTimeout = 30 * time.Second
 
 // 버튼 customID 상수.
 const (
-	customIDWeeklyRepoPrefix      = "weekly_repo:" // 레포 클릭 — owner/name
+	customIDWeeklyRepoPrefix      = "weekly_repo:"  // 레포 클릭 — owner/name
+	customIDWeeklyScopePrefix     = "weekly_scope:" // scope 클릭 — issues/commits/both
 	customIDWeeklyDirectiveBtn    = "weekly_directive"
 	customIDWeeklyPeriodPromptBtn = "weekly_period_prompt" // [기간 변경] 클릭 — 14/30 sub-prompt 노출
 	customIDWeeklyPeriod14        = "weekly_period_14"     // 14일 즉시 재분석
@@ -91,8 +92,11 @@ func buildWeeklyRepoRows(repos []WeeklyRepo) []discordgo.MessageComponent {
 	return rows
 }
 
-// handleWeeklyRepoSelect는 레포 버튼 클릭 시 호출. ack 응답 후 runWeeklyAnalyze로 위임.
-// 모든 레포 동일 입력: open 이슈 전체 + 지난 commitWindow(14일) 커밋.
+// handleWeeklyRepoSelect는 레포 버튼 클릭 시 호출. 즉시 분석하지 않고 scope 선택 prompt를 띄운다.
+// 사용자가 [이슈] / [커밋(2주)] / [전체] 중 하나를 눌러야 실제 fetch + LLM 호출이 진행된다.
+//
+// 선택된 fullName은 sess.PendingWeeklyRepo에 박제하고, scope 클릭 시 handleWeeklyScopeSelect가
+// 이 값을 꺼내서 runWeeklyAnalyze에 전달한다.
 func handleWeeklyRepoSelect(s *discordgo.Session, i *discordgo.InteractionCreate, fullName string) {
 	log.Printf("[주간/select] channel=%s repo=%s by=%s",
 		i.ChannelID, fullName, i.Member.User.Username)
@@ -103,17 +107,83 @@ func handleWeeklyRepoSelect(s *discordgo.Session, i *discordgo.InteractionCreate
 		return
 	}
 
-	respondInteraction(s, i, fmt.Sprintf("`%s` open 이슈 + 지난 14일 커밋 수집 중...", fullName))
-	now := time.Now()
-	runWeeklyAnalyze(s, sess, fullName, now.Add(-commitWindow), now, "")
+	sess.PendingWeeklyRepo = fullName
+	respondInteractionWithComponents(s, i,
+		fmt.Sprintf("`%s` 어떤 범위로 분석할까요?\n\n"+
+			"**이슈**: 현재 OPEN 이슈 전체 (시간 윈도우 무관)\n"+
+			"**커밋(2주)**: 지난 14일 커밋 흐름만\n"+
+			"**전체**: 이슈 + 커밋 둘 다 (운영 진단 풀 리포트)", fullName),
+		weeklyScopeComponents(),
+	)
 }
 
-// runWeeklyAnalyze는 주간 분석의 핵심 로직. handleWeeklyRepoSelect 외에도
+// handleWeeklyScopeSelect는 scope 버튼 클릭 시 호출. PendingWeeklyRepo를 꺼내서 runWeeklyAnalyze에 위임.
+// scope=both/commits면 commitWindow(14일) 커밋 윈도우를 사용. scope=issues는 커밋 fetch 자체를 생략하므로
+// since/until은 user 메시지 헤더용 정보로만 동봉된다.
+func handleWeeklyScopeSelect(s *discordgo.Session, i *discordgo.InteractionCreate, scope llm.WeeklyScope) {
+	sess := lookupSession(i.ChannelID)
+	if sess == nil {
+		respondInteraction(s, i, "세션이 만료되었습니다. 다시 시작해주세요.")
+		return
+	}
+	if sess.PendingWeeklyRepo == "" {
+		respondInteraction(s, i, "선택된 레포가 없습니다. [주간 정리]부터 다시 시작해주세요.")
+		return
+	}
+	fullName := sess.PendingWeeklyRepo
+	sess.PendingWeeklyRepo = "" // 한 번 쓰고 비움
+
+	log.Printf("[주간/scope] channel=%s repo=%s scope=%s by=%s",
+		i.ChannelID, fullName, scope, i.Member.User.Username)
+
+	respondInteraction(s, i, fmt.Sprintf("`%s` %s 분석 중...", fullName, scopeAckLabel(scope)))
+	now := time.Now()
+	runWeeklyAnalyze(s, sess, fullName, now.Add(-commitWindow), now, "", scope)
+}
+
+// scopeAckLabel은 ack 메시지에 들어가는 짧은 라벨.
+func scopeAckLabel(scope llm.WeeklyScope) string {
+	switch scope {
+	case llm.WeeklyScopeIssues:
+		return "open 이슈 전체 수집"
+	case llm.WeeklyScopeCommits:
+		return "지난 14일 커밋 수집"
+	default:
+		return "open 이슈 + 지난 14일 커밋 수집"
+	}
+}
+
+// weeklyScopeComponents는 레포 선택 직후 노출되는 [이슈] [커밋(2주)] [전체] 버튼 행.
+func weeklyScopeComponents() []discordgo.MessageComponent {
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.Button{Label: "이슈", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyScopePrefix + "issues"},
+			discordgo.Button{Label: "커밋(2주)", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyScopePrefix + "commits"},
+			discordgo.Button{Label: "전체", Style: discordgo.SuccessButton, CustomID: customIDWeeklyScopePrefix + "both"},
+			homeButton(),
+		}},
+	}
+}
+
+// isWeeklyScopeCustomID는 custom_id가 weekly_scope:* 패턴인지 검사한다.
+func isWeeklyScopeCustomID(id string) bool {
+	return strings.HasPrefix(id, customIDWeeklyScopePrefix)
+}
+
+// extractWeeklyScope는 weekly_scope:<token>에서 WeeklyScope를 추출한다.
+// 알 수 없는 token이면 ok=false.
+func extractWeeklyScope(id string) (llm.WeeklyScope, bool) {
+	tok := strings.TrimPrefix(id, customIDWeeklyScopePrefix)
+	return llm.ParseWeeklyScope(tok)
+}
+
+// runWeeklyAnalyze는 주간 분석의 핵심 로직. handleWeeklyScopeSelect 외에도
 // follow-up 핸들러 ([다시 분석] / [기간 변경] / [추가 요청])들이 같은 함수를 다른
 // 인자로 호출한다.
 //
-// 결과 메시지 끝에 follow-up 5개 버튼을 자동 첨부하고 sess에 컨텍스트를 박제한다.
-func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, since, until time.Time, directive string) {
+// scope에 따라 fetch가 분기된다 — Issues는 커밋 fetch를 생략, Commits는 이슈 fetch 생략, Both는 둘 다.
+// 결과 메시지 끝에 follow-up 버튼을 자동 첨부하고 sess에 컨텍스트(scope 포함)를 박제한다.
+func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, since, until time.Time, directive string, scope llm.WeeklyScope) {
 	owner, name, ok := splitRepoFullName(fullName)
 	if !ok {
 		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("잘못된 레포 식별자: `%s`", fullName))
@@ -128,34 +198,37 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 		return
 	}
 
-	// 1) GitHub 데이터 수집 — 입력은 모든 레포 동일:
-	//    - 이슈: 현재 open 전체 (since 미적용)
-	//    - 커밋: 지난 N일 (since~until 윈도우)
+	// 1) GitHub 데이터 수집 — scope에 따라 분기. 비포함 소스는 nil/0건으로 LLM에 전달된다.
 	ghCtx, ghCancel := context.WithTimeout(context.Background(), weeklyGitHubTimeout)
 	defer ghCancel()
-	issues, err := githubClient.ListIssues(ghCtx, owner, name, github.ListIssuesOptions{
-		State: "open",
-	})
-	if err != nil {
-		log.Printf("[주간/issues] ERR repo=%s err=%v", fullName, err)
-		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("이슈 조회 실패: %v", err))
-		return
+
+	var (
+		issues  []github.Issue
+		commits []github.Commit
+		err     error
+	)
+	if scope.IncludesIssues() {
+		issues, err = githubClient.ListIssues(ghCtx, owner, name, github.ListIssuesOptions{State: "open"})
+		if err != nil {
+			log.Printf("[주간/issues] ERR repo=%s err=%v", fullName, err)
+			s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("이슈 조회 실패: %v", err))
+			return
+		}
 	}
-	commits, err := githubClient.ListCommits(ghCtx, owner, name, github.ListCommitsOptions{
-		Since: since,
-		Until: until,
-	})
-	if err != nil {
-		log.Printf("[주간/commits] ERR repo=%s err=%v", fullName, err)
-		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("커밋 조회 실패: %v", err))
-		return
+	if scope.IncludesCommits() {
+		commits, err = githubClient.ListCommits(ghCtx, owner, name, github.ListCommitsOptions{Since: since, Until: until})
+		if err != nil {
+			log.Printf("[주간/commits] ERR repo=%s err=%v", fullName, err)
+			s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("커밋 조회 실패: %v", err))
+			return
+		}
 	}
-	log.Printf("[주간/data] repo=%s commit_since=%s issues_open=%d commits=%d directive_runes=%d",
-		fullName, since.UTC().Format(time.RFC3339), len(issues), len(commits), len([]rune(directive)))
+	log.Printf("[주간/data] repo=%s scope=%s commit_since=%s issues_open=%d commits=%d directive_runes=%d",
+		fullName, scope, since.UTC().Format(time.RFC3339), len(issues), len(commits), len([]rune(directive)))
 
 	if len(issues) == 0 && len(commits) == 0 {
 		s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-			Content: fmt.Sprintf("`%s` 레포에서 해당 기간 활동(이슈 + 커밋)이 없습니다.", fullName),
+			Content: fmt.Sprintf("`%s` 레포에서 해당 범위(%s) 활동이 없습니다.", fullName, scope),
 			Components: []discordgo.MessageComponent{
 				discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}},
 			},
@@ -166,20 +239,20 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 	}
 
 	// 2) LLM 분석
-	s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("이슈 %d건 + 커밋 %d건을 분석하는 중...", len(issues), len(commits)))
+	s.ChannelMessageSend(sess.ThreadID, weeklyAnalyzingMessage(scope, len(issues), len(commits)))
 	llmCtx, llmCancel := context.WithTimeout(context.Background(), weeklyLLMTimeout)
 	defer llmCancel()
 
 	start := time.Now()
-	resp, err := summarize.Weekly(llmCtx, llmClient, fullName, since, until, issues, commits, directive)
+	resp, err := summarize.Weekly(llmCtx, llmClient, fullName, since, until, issues, commits, directive, scope)
 	dur := time.Since(start)
 	if err != nil {
 		log.Printf("[주간/llm] ERR repo=%s elapsed=%s err=%v", fullName, dur, err)
 		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("LLM 분석 실패: %v", err))
 		return
 	}
-	log.Printf("[주간/llm] ok repo=%s elapsed=%s markdown_runes=%d closeable=%d",
-		fullName, dur, len([]rune(resp.Markdown)), len(resp.Closeable))
+	log.Printf("[주간/llm] ok repo=%s scope=%s elapsed=%s markdown_runes=%d closeable=%d",
+		fullName, scope, dur, len([]rune(resp.Markdown)), len(resp.Closeable))
 
 	// 3) 렌더링 + 분할 전송. 마지막 chunk에 follow-up 버튼 첨부.
 	rendered := render.RenderWeekly(render.WeeklyRenderInput{
@@ -190,7 +263,7 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 		CommitCount:  len(commits),
 		Response:     resp,
 	})
-	if _, err := sendLongMessageWithComponents(s, sess.ThreadID, rendered, weeklyFollowupComponents(len(resp.Closeable))); err != nil {
+	if _, err := sendLongMessageWithComponents(s, sess.ThreadID, rendered, weeklyFollowupComponents(len(resp.Closeable), scope)); err != nil {
 		log.Printf("[주간/send] ERR repo=%s: %v", fullName, err)
 	}
 
@@ -199,24 +272,42 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 	sess.LastWeeklySince = since
 	sess.LastWeeklyUntil = until
 	sess.LastWeeklyDirective = directive
+	sess.LastWeeklyScope = scope
 	sess.LastWeeklyResponse = resp
 	sess.LastWeeklyCloseable = resp.Closeable
 	sess.LastBotSummary = rendered
 	sess.State = StateSelectMode
 }
 
-// weeklyFollowupComponents는 분석 결과 메시지 하단에 첨부하는 follow-up 버튼들을 만든다.
-// closeableCount > 0 일 때만 두 번째 row에 [닫아도 될 이슈 N건 닫기] 버튼을 추가한다.
-func weeklyFollowupComponents(closeableCount int) []discordgo.MessageComponent {
-	rows := []discordgo.MessageComponent{
-		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-			discordgo.Button{Label: "추가 요청", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyDirectiveBtn},
-			discordgo.Button{Label: "기간 변경", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyPeriodPromptBtn},
-			discordgo.Button{Label: "다시 분석", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyRetryBtn},
-			discordgo.Button{Label: "미팅 시작", Style: discordgo.SuccessButton, CustomID: customIDWeeklyToMeetingBtn},
-			discordgo.Button{Label: "처음 메뉴", Style: discordgo.SecondaryButton, CustomID: customIDHomeBtn},
-		}},
+// weeklyAnalyzingMessage는 fetch 직후 "분석 중..." 안내 문구를 scope에 맞춰 생성한다.
+func weeklyAnalyzingMessage(scope llm.WeeklyScope, issueCount, commitCount int) string {
+	switch scope {
+	case llm.WeeklyScopeIssues:
+		return fmt.Sprintf("이슈 %d건을 분석하는 중...", issueCount)
+	case llm.WeeklyScopeCommits:
+		return fmt.Sprintf("커밋 %d건을 분석하는 중...", commitCount)
+	default:
+		return fmt.Sprintf("이슈 %d건 + 커밋 %d건을 분석하는 중...", issueCount, commitCount)
 	}
+}
+
+// weeklyFollowupComponents는 분석 결과 메시지 하단에 첨부하는 follow-up 버튼들을 만든다.
+// scope=Issues에서는 커밋 윈도우가 의미 없으므로 [기간 변경] 버튼을 노출하지 않는다.
+// closeableCount > 0 일 때만 두 번째 row에 [닫아도 될 이슈 N건 닫기] 버튼을 추가한다.
+func weeklyFollowupComponents(closeableCount int, scope llm.WeeklyScope) []discordgo.MessageComponent {
+	row1 := []discordgo.MessageComponent{
+		discordgo.Button{Label: "추가 요청", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyDirectiveBtn},
+	}
+	if scope.IncludesCommits() {
+		row1 = append(row1, discordgo.Button{Label: "기간 변경", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyPeriodPromptBtn})
+	}
+	row1 = append(row1,
+		discordgo.Button{Label: "다시 분석", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyRetryBtn},
+		discordgo.Button{Label: "미팅 시작", Style: discordgo.SuccessButton, CustomID: customIDWeeklyToMeetingBtn},
+		discordgo.Button{Label: "처음 메뉴", Style: discordgo.SecondaryButton, CustomID: customIDHomeBtn},
+	)
+	rows := []discordgo.MessageComponent{discordgo.ActionsRow{Components: row1}}
+
 	if closeableCount > 0 {
 		rows = append(rows, discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{
@@ -277,25 +368,34 @@ func handleWeeklyAwaitDirectiveMessage(s *discordgo.Session, m *discordgo.Messag
 		sess.ThreadID, m.Author.Username, len([]rune(content)))
 	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("지시 반영하여 다시 분석합니다.\n> %s", truncate(content, 200)))
 	now := time.Now()
-	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, now.Add(-commitWindow), now, content)
+	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, now.Add(-commitWindow), now, content, sess.LastWeeklyScope)
 }
 
 // handleWeeklyPeriod는 [14일] / [30일] sub-button 클릭 시 즉시 재분석한다.
+// scope=Issues는 커밋 윈도우가 의미 없으므로 거부한다 (애초에 [기간 변경] 버튼을 노출하지 않지만 방어적 가드).
 func handleWeeklyPeriod(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session, days int) {
 	if sess.LastWeeklyRepo == "" {
 		respondInteraction(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
 		return
 	}
+	if !sess.LastWeeklyScope.IncludesCommits() {
+		respondInteraction(s, i, "이슈 전용 분석에는 기간 변경이 적용되지 않습니다.")
+		return
+	}
 	respondInteraction(s, i, fmt.Sprintf("`%s` 레포를 지난 %d일로 다시 분석합니다.", sess.LastWeeklyRepo, days))
 	now := time.Now()
 	since := now.Add(-time.Duration(days) * 24 * time.Hour)
-	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, since, now, sess.LastWeeklyDirective)
+	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, since, now, sess.LastWeeklyDirective, sess.LastWeeklyScope)
 }
 
 // handleWeeklyPeriodPrompt는 [기간 변경] 클릭 시 14/30 sub-prompt를 띄운다.
 func handleWeeklyPeriodPrompt(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
 	if sess.LastWeeklyRepo == "" {
 		respondInteraction(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
+		return
+	}
+	if !sess.LastWeeklyScope.IncludesCommits() {
+		respondInteraction(s, i, "이슈 전용 분석에는 기간 변경이 적용되지 않습니다.")
 		return
 	}
 	respondInteractionWithRow(s, i, "어느 기간으로 다시 분석할까요?",
@@ -305,14 +405,14 @@ func handleWeeklyPeriodPrompt(s *discordgo.Session, i *discordgo.InteractionCrea
 	)
 }
 
-// handleWeeklyRetry는 [다시 분석] 클릭 시 같은 repo + 기간 + directive로 재호출한다.
+// handleWeeklyRetry는 [다시 분석] 클릭 시 같은 repo + 기간 + directive + scope로 재호출한다.
 func handleWeeklyRetry(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
 	if sess.LastWeeklyRepo == "" {
 		respondInteraction(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
 		return
 	}
 	respondInteraction(s, i, fmt.Sprintf("`%s` 레포를 같은 조건으로 다시 분석합니다.", sess.LastWeeklyRepo))
-	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, sess.LastWeeklySince, sess.LastWeeklyUntil, sess.LastWeeklyDirective)
+	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, sess.LastWeeklySince, sess.LastWeeklyUntil, sess.LastWeeklyDirective, sess.LastWeeklyScope)
 }
 
 // handleWeeklyToMeeting는 [미팅 시작] 클릭 시 분석 결과 마크다운을 미팅 첫 노트로 주입한 뒤 미팅 모드 진입.

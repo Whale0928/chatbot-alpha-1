@@ -84,6 +84,15 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleWeeklyRepoSelect(s, i, extractWeeklyRepoFullName(data.CustomID))
 		return
 	}
+	if isWeeklyScopeCustomID(data.CustomID) {
+		scope, ok := extractWeeklyScope(data.CustomID)
+		if !ok {
+			respondInteraction(s, i, "알 수 없는 분석 범위입니다.")
+			return
+		}
+		handleWeeklyScopeSelect(s, i, scope)
+		return
+	}
 
 	// 주간 follow-up 버튼들. weekly.go의 핸들러에 위임.
 	switch data.CustomID {
