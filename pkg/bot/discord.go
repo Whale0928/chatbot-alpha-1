@@ -59,6 +59,9 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	case discordgo.InteractionApplicationCommand:
 		handleSlashCommand(s, i)
 		return
+	case discordgo.InteractionModalSubmit:
+		handleModalSubmit(s, i)
+		return
 	case discordgo.InteractionMessageComponent:
 		// 아래 기존 버튼 처리 흐름으로 진행
 	default:
@@ -102,11 +105,14 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	case customIDWeeklyPeriodPromptBtn:
 		handleWeeklyPeriodPrompt(s, i, sess)
 		return
+	case customIDWeeklyPeriod7:
+		handleWeeklyPeriod(s, i, sess, 7)
+		return
 	case customIDWeeklyPeriod14:
 		handleWeeklyPeriod(s, i, sess, 14)
 		return
-	case customIDWeeklyPeriod30:
-		handleWeeklyPeriod(s, i, sess, 30)
+	case customIDWeeklyPeriodCalendar:
+		handleWeeklyPeriodCalendar(s, i, sess)
 		return
 	case customIDWeeklyRetryBtn:
 		handleWeeklyRetry(s, i, sess)
@@ -226,6 +232,32 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	default:
 		respondInteraction(s, i, "알 수 없는 동작입니다.")
+	}
+}
+
+// handleModalSubmit는 InteractionModalSubmit 타입 인터랙션을 customID로 라우팅한다.
+// 모달은 채널/스레드 안에서만 띄울 수 있고, sess는 ChannelID로 조회한다.
+//
+// 현재 처리하는 모달:
+//   - customIDWeeklyPeriodModal: [캘린더] 시작일 입력 — handleWeeklyPeriodModalSubmit
+//
+// 미정의 customID는 ephemeral 안내 + 로그만 남기고 무시한다.
+func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	id := i.ModalSubmitData().CustomID
+
+	sess := lookupSession(i.ChannelID)
+	if sess == nil {
+		respondInteractionEphemeral(s, i, "세션이 만료되었습니다. 다시 시작해주세요.")
+		return
+	}
+	sess.UpdatedAt = time.Now()
+
+	switch id {
+	case customIDWeeklyPeriodModal:
+		handleWeeklyPeriodModalSubmit(s, i, sess)
+	default:
+		log.Printf("[modal] WARN 알 수 없는 custom_id=%q channel=%s", id, i.ChannelID)
+		respondInteractionEphemeral(s, i, "처리할 수 없는 모달 응답입니다.")
 	}
 }
 

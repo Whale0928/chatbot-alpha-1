@@ -40,15 +40,22 @@ const (
 	customIDWeeklyRepoPrefix      = "weekly_repo:"  // 레포 클릭 — owner/name
 	customIDWeeklyScopePrefix     = "weekly_scope:" // scope 클릭 — issues/commits/both
 	customIDWeeklyDirectiveBtn    = "weekly_directive"
-	customIDWeeklyPeriodPromptBtn = "weekly_period_prompt" // [기간 변경] 클릭 — 14/30 sub-prompt 노출
-	customIDWeeklyPeriod14        = "weekly_period_14"     // 14일 즉시 재분석
-	customIDWeeklyPeriod30        = "weekly_period_30"     // 30일 즉시 재분석
+	customIDWeeklyPeriodPromptBtn = "weekly_period_prompt"     // [기간 변경] 클릭 — [1주][2주][캘린더] sub-prompt
+	customIDWeeklyPeriod7         = "weekly_period_7"          // 7일(1주) 즉시 재분석
+	customIDWeeklyPeriod14        = "weekly_period_14"         // 14일(2주) 즉시 재분석
+	customIDWeeklyPeriodCalendar  = "weekly_period_calendar"   // [캘린더] — modal 발사
+	customIDWeeklyPeriodModal     = "weekly_period_modal"      // modal submit custom_id
+	customIDWeeklyPeriodModalDate = "weekly_period_modal_date" // modal text input field id
 	customIDWeeklyRetryBtn        = "weekly_retry"
 	customIDWeeklyToMeetingBtn    = "weekly_to_meeting"
 	customIDWeeklyCloseStartBtn   = "weekly_close_start"   // [닫아도 될 이슈 N건 닫기] — 확인 prompt 노출
 	customIDWeeklyCloseConfirmBtn = "weekly_close_confirm" // 확인 후 실제 close API 호출
 	customIDHomeBtn               = "mode_home"
 )
+
+// weeklyMaxCustomDays는 [캘린더]로 지정 가능한 시작일의 최대 과거 일수.
+// 30일 초과 시작일은 분석 토큰량/품질 양쪽에 부담이 커서 거부한다.
+const weeklyMaxCustomDays = 30
 
 // sendWeeklyRepoButtons는 [주간 정리] 클릭 시 weeklyRepos를 5개씩 ActionsRow로 분할하여
 // 직접 버튼으로 노출한다 (그룹 navigation 없음).
@@ -371,7 +378,7 @@ func handleWeeklyAwaitDirectiveMessage(s *discordgo.Session, m *discordgo.Messag
 	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, now.Add(-commitWindow), now, content, sess.LastWeeklyScope)
 }
 
-// handleWeeklyPeriod는 [14일] / [30일] sub-button 클릭 시 즉시 재분석한다.
+// handleWeeklyPeriod는 [1주] / [2주] sub-button 클릭 시 즉시 재분석한다.
 // scope=Issues는 커밋 윈도우가 의미 없으므로 거부한다 (애초에 [기간 변경] 버튼을 노출하지 않지만 방어적 가드).
 func handleWeeklyPeriod(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session, days int) {
 	if sess.LastWeeklyRepo == "" {
@@ -388,7 +395,8 @@ func handleWeeklyPeriod(s *discordgo.Session, i *discordgo.InteractionCreate, se
 	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, since, now, sess.LastWeeklyDirective, sess.LastWeeklyScope)
 }
 
-// handleWeeklyPeriodPrompt는 [기간 변경] 클릭 시 14/30 sub-prompt를 띄운다.
+// handleWeeklyPeriodPrompt는 [기간 변경] 클릭 시 [1주][2주][캘린더] sub-prompt를 띄운다.
+// [캘린더]는 클릭 시 modal로 사용자가 임의 시작일(YYYY-MM-DD, 30일 이내)을 직접 지정한다.
 func handleWeeklyPeriodPrompt(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
 	if sess.LastWeeklyRepo == "" {
 		respondInteraction(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
@@ -398,11 +406,116 @@ func handleWeeklyPeriodPrompt(s *discordgo.Session, i *discordgo.InteractionCrea
 		respondInteraction(s, i, "이슈 전용 분석에는 기간 변경이 적용되지 않습니다.")
 		return
 	}
-	respondInteractionWithRow(s, i, "어느 기간으로 다시 분석할까요?",
-		discordgo.Button{Label: "14일", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyPeriod14},
-		discordgo.Button{Label: "30일", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyPeriod30},
+	respondInteractionWithRow(s, i, "어느 기간으로 다시 분석할까요? (캘린더는 최대 30일 이내 임의 시작일)",
+		discordgo.Button{Label: "1주", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyPeriod7},
+		discordgo.Button{Label: "2주", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyPeriod14},
+		discordgo.Button{Label: "캘린더", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyPeriodCalendar},
 		homeButton(),
 	)
+}
+
+// handleWeeklyPeriodCalendar는 [캘린더] 버튼 클릭 시 modal을 띄워 임의 시작일을 입력 받는다.
+// placeholder는 "오늘 - 14일"의 실제 날짜 — 빈 칸이면 포맷 마찰이 생기므로 한 글자만 고치면 되도록 실시한다.
+// scope=Issues 가드는 [기간 변경] 버튼이 이미 숨겨졌으니 여기서도 방어적 검사.
+func handleWeeklyPeriodCalendar(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
+	if sess.LastWeeklyRepo == "" {
+		respondInteractionEphemeral(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
+		return
+	}
+	if !sess.LastWeeklyScope.IncludesCommits() {
+		respondInteractionEphemeral(s, i, "이슈 전용 분석에는 기간 변경이 적용되지 않습니다.")
+		return
+	}
+	placeholder := time.Now().Add(-14 * 24 * time.Hour).Format("2006-01-02")
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseModal,
+		Data: &discordgo.InteractionResponseData{
+			CustomID: customIDWeeklyPeriodModal,
+			Title:    "커밋 분석 시작일",
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.TextInput{
+							CustomID:    customIDWeeklyPeriodModalDate,
+							Label:       fmt.Sprintf("시작일 (YYYY-MM-DD, 최대 %d일 이내)", weeklyMaxCustomDays),
+							Style:       discordgo.TextInputShort,
+							Placeholder: placeholder,
+							Required:    true,
+							MinLength:   10,
+							MaxLength:   10,
+						},
+					},
+				},
+			},
+		},
+	}); err != nil {
+		log.Printf("[주간/calendar] ERR modal 발사 실패: %v", err)
+	}
+}
+
+// handleWeeklyPeriodModalSubmit는 사용자가 [캘린더] modal에 시작일을 입력하고 제출했을 때 호출된다.
+// 검증 순서:
+//  1. 형식 (YYYY-MM-DD strict)
+//  2. 미래 날짜 거부
+//  3. 30일 초과 거부
+//
+// 통과 시 sess.LastWeeklyScope를 유지한 채 runWeeklyAnalyze로 분석을 트리거한다.
+// 검증 실패는 ephemeral 응답으로 사용자에게만 안내해 채널을 어지럽히지 않는다.
+func handleWeeklyPeriodModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
+	if sess.LastWeeklyRepo == "" {
+		respondInteractionEphemeral(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
+		return
+	}
+	if !sess.LastWeeklyScope.IncludesCommits() {
+		respondInteractionEphemeral(s, i, "이슈 전용 분석에는 기간 변경이 적용되지 않습니다.")
+		return
+	}
+	raw := strings.TrimSpace(extractModalTextValue(i, customIDWeeklyPeriodModalDate))
+	if raw == "" {
+		respondInteractionEphemeral(s, i, "시작일이 비어 있습니다.")
+		return
+	}
+	since, err := time.ParseInLocation("2006-01-02", raw, time.Local)
+	if err != nil {
+		respondInteractionEphemeral(s, i, fmt.Sprintf("날짜 형식이 올바르지 않습니다 (입력=%q). YYYY-MM-DD 형식으로 다시 입력해주세요.", raw))
+		return
+	}
+	now := time.Now()
+	if since.After(now) {
+		respondInteractionEphemeral(s, i, fmt.Sprintf("시작일이 미래입니다 (입력=%s, 오늘=%s).",
+			since.Format("2006-01-02"), now.Format("2006-01-02")))
+		return
+	}
+	maxAge := time.Duration(weeklyMaxCustomDays) * 24 * time.Hour
+	if now.Sub(since) > maxAge {
+		respondInteractionEphemeral(s, i, fmt.Sprintf("최대 %d일 이내 시작일만 지원합니다 (입력=%s, 한도=%s).",
+			weeklyMaxCustomDays, since.Format("2006-01-02"), now.Add(-maxAge).Format("2006-01-02")))
+		return
+	}
+
+	respondInteraction(s, i, fmt.Sprintf("`%s` 레포를 %s 이후 커밋으로 다시 분석합니다.",
+		sess.LastWeeklyRepo, since.Format("2006-01-02")))
+	log.Printf("[주간/calendar] thread=%s repo=%s since=%s scope=%s",
+		sess.ThreadID, sess.LastWeeklyRepo, since.Format(time.RFC3339), sess.LastWeeklyScope)
+	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, since, now, sess.LastWeeklyDirective, sess.LastWeeklyScope)
+}
+
+// extractModalTextValue는 ModalSubmit interaction에서 지정한 customID의 TextInput 값을 꺼낸다.
+// 찾지 못하면 "" 반환.
+func extractModalTextValue(i *discordgo.InteractionCreate, fieldID string) string {
+	data := i.ModalSubmitData()
+	for _, row := range data.Components {
+		actionRow, ok := row.(*discordgo.ActionsRow)
+		if !ok {
+			continue
+		}
+		for _, comp := range actionRow.Components {
+			if input, ok := comp.(*discordgo.TextInput); ok && input.CustomID == fieldID {
+				return input.Value
+			}
+		}
+	}
+	return ""
 }
 
 // handleWeeklyRetry는 [다시 분석] 클릭 시 같은 repo + 기간 + directive + scope로 재호출한다.
