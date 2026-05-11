@@ -8,21 +8,27 @@ import (
 	"chatbot-alpha-1/pkg/github"
 )
 
-func TestSummarizeChecks(t *testing.T) {
+func TestRenderCIProgress(t *testing.T) {
 	cases := []struct {
 		name      string
 		checks    []github.CheckRun
-		wantStat  string
-		wantDetIn string // substring of detail (empty = don't care)
+		wantIn    []string // 출력에 포함돼야 할 substring 들
+		wantNotIn []string
 	}{
-		{"empty", nil, "no_checks", "체크 없음"},
+		{
+			"empty",
+			nil,
+			[]string{"등록된 체크 없음"},
+			nil,
+		},
 		{
 			"all success",
 			[]github.CheckRun{
 				{Name: "prepare", Status: "completed", Conclusion: "success"},
 				{Name: "unit", Status: "completed", Conclusion: "success"},
 			},
-			"✓ success", "2/2 완료",
+			[]string{"████████████████████", "✓ 2/2", "100%", "✓ prepare", "✓ unit"},
+			[]string{"░"},
 		},
 		{
 			"partial running",
@@ -31,7 +37,8 @@ func TestSummarizeChecks(t *testing.T) {
 				{Name: "unit", Status: "in_progress"},
 				{Name: "rule", Status: "queued"},
 			},
-			"▶ running", "1/3 완료",
+			[]string{"▶ 1/3 (33%)", "✓ prepare", "▶ unit", "⋯ rule"},
+			nil,
 		},
 		{
 			"failure",
@@ -39,17 +46,22 @@ func TestSummarizeChecks(t *testing.T) {
 				{Name: "prepare", Status: "completed", Conclusion: "success"},
 				{Name: "unit", Status: "completed", Conclusion: "failure"},
 			},
-			"❌ failure", "실패: unit",
+			[]string{"❌ 2/2 (실패 1)", "✓ prepare", "✗ unit"},
+			nil,
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			gotStat, gotDet := summarizeChecks(c.checks)
-			if gotStat != c.wantStat {
-				t.Errorf("status = %q, want %q", gotStat, c.wantStat)
+			got := renderCIProgress(c.checks)
+			for _, s := range c.wantIn {
+				if !strings.Contains(got, s) {
+					t.Errorf("substring %q 누락\n%s", s, got)
+				}
 			}
-			if c.wantDetIn != "" && !strings.Contains(gotDet, c.wantDetIn) {
-				t.Errorf("detail = %q (substring %q 없음)", gotDet, c.wantDetIn)
+			for _, s := range c.wantNotIn {
+				if strings.Contains(got, s) {
+					t.Errorf("substring %q 가 들어있으면 안 됨\n%s", s, got)
+				}
 			}
 		})
 	}
@@ -135,25 +147,6 @@ func TestJoinTruncate(t *testing.T) {
 		got := joinTruncate(c.in, c.max)
 		if got != c.want {
 			t.Errorf("joinTruncate(%v, %d) = %q, want %q", c.in, c.max, got, c.want)
-		}
-	}
-}
-
-func TestFmtElapsed(t *testing.T) {
-	cases := []struct {
-		d    time.Duration
-		want string
-	}{
-		{0, "0:00"},
-		{45 * time.Second, "0:45"},
-		{83 * time.Second, "1:23"},
-		{3601 * time.Second, "1h 0m"},
-		{4500 * time.Second, "1h 15m"},
-	}
-	for _, c := range cases {
-		got := fmtElapsed(c.d)
-		if got != c.want {
-			t.Errorf("fmtElapsed(%v) = %q, want %q", c.d, got, c.want)
 		}
 	}
 }
