@@ -126,7 +126,7 @@ func handleWeeklyRepoSelect(s *discordgo.Session, i *discordgo.InteractionCreate
 	respondInteractionWithComponents(s, i,
 		fmt.Sprintf("`%s` 어떤 범위로 분석할까요?\n\n"+
 			"**이슈**: 현재 OPEN 이슈 전체 (시간 윈도우 무관)\n"+
-			"**커밋(2주)**: 지난 14일 커밋 흐름만\n"+
+			"**커밋**: 커밋만 (기간은 다음 단계에서 선택)\n"+
 			"**전체**: 이슈 + 커밋 둘 다 (운영 진단 풀 리포트)", fullName),
 		weeklyScopeComponents(),
 	)
@@ -175,9 +175,9 @@ func scopeAckLabel(scope llm.WeeklyScope) string {
 	case llm.WeeklyScopeIssues:
 		return "open 이슈 전체 수집"
 	case llm.WeeklyScopeCommits:
-		return "지난 14일 커밋 수집"
+		return "커밋 수집"
 	default:
-		return "open 이슈 + 지난 14일 커밋 수집"
+		return "open 이슈 + 커밋 수집"
 	}
 }
 
@@ -186,7 +186,7 @@ func weeklyScopeComponents() []discordgo.MessageComponent {
 	return []discordgo.MessageComponent{
 		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{Label: "이슈", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyScopePrefix + "issues"},
-			discordgo.Button{Label: "커밋(2주)", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyScopePrefix + "commits"},
+			discordgo.Button{Label: "커밋", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyScopePrefix + "commits"},
 			discordgo.Button{Label: "전체", Style: discordgo.SuccessButton, CustomID: customIDWeeklyScopePrefix + "both"},
 			homeButton(),
 		}},
