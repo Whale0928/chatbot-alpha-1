@@ -473,26 +473,36 @@ func updateProgressError(s *discordgo.Session, sess *Session, rc *ReleaseContext
 	sess.ReleaseCtx = nil
 }
 
-// sendReleaseResult는 완료 후 PR 본문 미리보기 + [처음 메뉴] 안내.
-// Slice 6 시점에는 폴링 없이 PR 링크와 안내만. Slice 7 에서 폴링 패널이 이 자리에서 시작.
+// sendReleaseResult는 완료 후 PR 본문 미리보기 + [PR 열기][처음 메뉴] 안내.
+// PR URL 은 plain text 가 아닌 LinkButton 으로 노출해 클릭 동선을 일관화.
 func sendReleaseResult(s *discordgo.Session, sess *Session, rc *ReleaseContext, prBody string) {
-	header := fmt.Sprintf("PR #%d 생성 완료 — `%s`\n%s\n\n본문 미리보기:",
-		rc.PRNumber, rc.PRURL, "(GitHub 에서 직접 머지해주세요. auto-merge 사용 안 함.)")
-	if err := sendLongMessage(s, sess.ThreadID, header); err != nil {
+	header := fmt.Sprintf("PR #%d 생성 완료 — `%s`\n머지는 GitHub 에서 직접 (auto-merge 사용 안 함).\n\n본문 미리보기는 아래 메시지.",
+		rc.PRNumber, rc.NewTag)
+	if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
+		Content:    header,
+		Components: releaseDoneComponents(rc.PRURL),
+	}); err != nil {
 		log.Printf("[릴리즈/result] header 전송 실패: %v", err)
 	}
 	if err := sendLongMessage(s, sess.ThreadID, prBody); err != nil {
 		log.Printf("[릴리즈/result] body 전송 실패: %v", err)
 	}
-	if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-		Content: "이어서 다른 작업을 시작하려면 [처음 메뉴]를 눌러주세요.",
-		Components: []discordgo.MessageComponent{
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}},
-		},
-	}); err != nil {
-		log.Printf("[릴리즈/result] home 버튼 전송 실패: %v", err)
-	}
 	sess.LastBotSummary = prBody
+}
+
+// releaseDoneComponents는 PR 생성 완료 메시지에 첨부할 버튼 행을 만든다.
+// [PR 열기] LinkButton + [처음 메뉴] 두 개. 외부 URL 은 항상 버튼으로 노출.
+func releaseDoneComponents(prURL string) []discordgo.MessageComponent {
+	row := []discordgo.MessageComponent{}
+	if prURL != "" {
+		row = append(row, discordgo.Button{
+			Label: "PR 열기",
+			Style: discordgo.LinkButton,
+			URL:   prURL,
+		})
+	}
+	row = append(row, homeButton())
+	return []discordgo.MessageComponent{discordgo.ActionsRow{Components: row}}
 }
 
 // =====================================================================

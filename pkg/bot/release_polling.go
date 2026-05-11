@@ -41,7 +41,7 @@ func pollReleasePR(ctx context.Context, s *discordgo.Session, sess *Session, rc 
 	// 초기 패널 전송 (loading state)
 	msg, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
 		Content:    fmt.Sprintf("🔄 **PR #%d** 머지 추적을 시작합니다... (첫 갱신 대기)", rc.PRNumber),
-		Components: releasePollComponents(false),
+		Components: releasePollComponents(rc.PRURL, false),
 	})
 	if err != nil {
 		log.Printf("[릴리즈/polling] 초기 패널 전송 실패 thread=%s: %v", sess.ThreadID, err)
@@ -99,7 +99,7 @@ func runOnePollCycle(ctx context.Context, s *discordgo.Session, sess *Session, r
 		return true
 	}
 	if pr.State == "closed" {
-		finalizePollPanel(s, sess, rc, fmt.Sprintf("🚫 **PR #%d** 가 머지되지 않고 닫혔습니다. (state=closed, merged=false)\n%s", rc.PRNumber, rc.PRURL), true)
+		finalizePollPanel(s, sess, rc, fmt.Sprintf("🚫 **PR #%d** 가 머지되지 않고 닫혔습니다. (state=closed, merged=false)", rc.PRNumber), true)
 		return true
 	}
 
@@ -122,18 +122,27 @@ func runOnePollCycle(ctx context.Context, s *discordgo.Session, sess *Session, r
 	return false
 }
 
-func releasePollComponents(stopped bool) []discordgo.MessageComponent {
-	if stopped {
-		return []discordgo.MessageComponent{
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}},
-		}
+// releasePollComponents는 폴링 패널의 버튼 행을 만든다.
+// prURL이 비어있지 않으면 GitHub PR로 바로 이동하는 LinkButton 을 맨 앞에 노출.
+// stopped=true 면 [폴링 중단] 버튼을 제거하고 [PR 열기][처음 메뉴] 만 남긴다.
+func releasePollComponents(prURL string, stopped bool) []discordgo.MessageComponent {
+	row := []discordgo.MessageComponent{}
+	if prURL != "" {
+		row = append(row, discordgo.Button{
+			Label: "PR 열기",
+			Style: discordgo.LinkButton,
+			URL:   prURL,
+		})
 	}
-	return []discordgo.MessageComponent{
-		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-			discordgo.Button{Label: "폴링 중단", Style: discordgo.DangerButton, CustomID: customIDReleasePollStop},
-			homeButton(),
-		}},
+	if !stopped {
+		row = append(row, discordgo.Button{
+			Label:    "폴링 중단",
+			Style:    discordgo.DangerButton,
+			CustomID: customIDReleasePollStop,
+		})
 	}
+	row = append(row, homeButton())
+	return []discordgo.MessageComponent{discordgo.ActionsRow{Components: row}}
 }
 
 // updatePollPanel 은 폴링 메시지를 in-place 편집한다 (진행 중 상태).
@@ -142,7 +151,7 @@ func updatePollPanel(s *discordgo.Session, sess *Session, rc *ReleaseContext, bo
 		Channel:    sess.ThreadID,
 		ID:         rc.PollMsgID,
 		Content:    &body,
-		Components: ptrComponents(releasePollComponents(stopped)),
+		Components: ptrComponents(releasePollComponents(rc.PRURL, stopped)),
 	})
 	if err != nil {
 		log.Printf("[릴리즈/polling] 패널 edit 실패 tick=%d: %v", tick, err)
@@ -155,7 +164,7 @@ func finalizePollPanel(s *discordgo.Session, sess *Session, rc *ReleaseContext, 
 		Channel:    sess.ThreadID,
 		ID:         rc.PollMsgID,
 		Content:    &body,
-		Components: ptrComponents(releasePollComponents(true)),
+		Components: ptrComponents(releasePollComponents(rc.PRURL, true)),
 	})
 	if err != nil {
 		log.Printf("[릴리즈/polling] 종료 edit 실패: %v", err)
@@ -179,7 +188,7 @@ func ptrComponents(cs []discordgo.MessageComponent) *[]discordgo.MessageComponen
 // 디스코드 2000자 제한 안에서 핵심만.
 func renderPollPanel(rc *ReleaseContext, pr *github.PullRequest, checks []github.CheckRun, reviews []github.Review, elapsed time.Duration, tick int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "🔄 **PR #%d** 머지 추적 — `%s`\n%s\n\n", rc.PRNumber, rc.Module.Key+"-v"+rc.NewVersion.String(), rc.PRURL)
+	fmt.Fprintf(&b, "🔄 **PR #%d** 머지 추적 — `%s`\n\n", rc.PRNumber, rc.Module.Key+"-v"+rc.NewVersion.String())
 
 	// CI
 	ciStatus, ciDetail := summarizeChecks(checks)
@@ -210,8 +219,8 @@ func renderPollPanel(rc *ReleaseContext, pr *github.PullRequest, checks []github
 // renderMergedSummary 는 PR 머지 완료 시 최종 메시지.
 func renderMergedSummary(rc *ReleaseContext, pr *github.PullRequest) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "✅ **PR #%d** 머지 완료 — `%s`\n%s\n\n",
-		rc.PRNumber, rc.Module.Key+"-v"+rc.NewVersion.String(), rc.PRURL)
+	fmt.Fprintf(&b, "✅ **PR #%d** 머지 완료 — `%s`\n\n",
+		rc.PRNumber, rc.Module.Key+"-v"+rc.NewVersion.String())
 	fmt.Fprintf(&b, "• base: `%s` ← head: `main`\n", pr.Base.Ref)
 	if rc.Module.HasDeploy {
 		fmt.Fprintf(&b, "• 후속: `release/%s` 머지로 deploy_v2_release_* 워크플로우가 자동 트리거됩니다 (sandbox 라 실제 배포 영향은 없음).\n",
