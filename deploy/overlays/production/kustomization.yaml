@@ -10,8 +10,8 @@ resources:
 generators:
   - ksops-generator.yaml
 
-# ArgoCD Image Updater(default-updater)가 newTag를 자동 갱신.
-# 최초 배포 시 첫 git tag와 동일한 값으로 두고, 이후 자동 업데이트에 위임.
+# newTag는 .github/workflows/release.yml 이 main 푸시마다 main-{sha7} 형식으로 자동 갱신한다.
+# Image Updater 의존성 제거 — GitHub Actions 가 직접 kustomize edit set image 로 commit/push.
 images:
   - name: docker-registry.bottle-note.com/chatbot-alpha-1
     newTag: v0.0.1

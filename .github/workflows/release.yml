@@ -1,43 +1,53 @@
 name: release
 
-# git tag vX.Y.Z push 시 amd64 이미지 빌드 → Zot push.
-# ArgoCD Image Updater(default-updater)가 새 semver 태그 감지 후 자동으로
-# Application의 newTag를 갱신하므로 별도 sync trigger 불필요.
+# main 푸시 시 amd64 이미지 빌드 → Zot push → GitOps overlay newTag 자동 갱신.
+# ArgoCD 가 deploy/overlays/production/kustomization.yaml 변경 감지 후 클러스터에 새 이미지 배포.
 #
-# Zot은 OCI media type만 받고 docker schema 2 manifest를 415로 거부한다
-# (application/vnd.docker.distribution.manifest.v2+json → 415 Unsupported).
+# 이미지 태그 컨벤션: main-{sha7} (immutable per commit). mutable 'latest' 는 사용하지 않는다.
+#
+# 자기 자신이 commit 하는 kustomization.yaml 변경은 paths-ignore 로 다음 워크플로우 트리거를 막는다.
+# 그 외 README/testdata 도 코드 동작과 무관하므로 paths-ignore.
+#
+# Zot 은 OCI media type 만 받고 docker schema 2 manifest 를 415 로 거부한다.
 # 따라서 buildx + oci-mediatypes=true 로 OCI 형식 push 강제.
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches:
+      - main
+    paths-ignore:
+      - 'deploy/overlays/production/kustomization.yaml'
+      - 'README.md'
+      - 'testdata/**'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Image tag to push (vX.Y.Z)'
-        required: true
+
+concurrency:
+  group: "release-${{ github.ref }}"
+  cancel-in-progress: true
 
 env:
   REGISTRY: docker-registry.bottle-note.com
-  IMAGE: docker-registry.bottle-note.com/chatbot-alpha-1
+  IMAGE_NAME: chatbot-alpha-1
 
 jobs:
-  build-push:
+  build-push-update:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # commit/push 단계에서 fast-forward rebase 가 필요하므로 full history.
+          fetch-depth: 0
 
       - name: Resolve tag
         id: tag
+        env:
+          GIT_SHA: ${{ github.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          fi
+          SHA7="${GIT_SHA:0:7}"
+          echo "value=main-${SHA7}" >> "$GITHUB_OUTPUT"
+          echo "tag = main-${SHA7}"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -59,7 +69,7 @@ jobs:
           sbom: false
           # Zot 호환을 위해 OCI media type 강제 + 단일 manifest push
           outputs: type=image,oci-mediatypes=true,push=true
-          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.value }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: |
@@ -67,7 +77,58 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.tag.outputs.value }}
 
-      - name: Summary
+      - name: Setup kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update overlay newTag
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.value }}
         run: |
-          echo "## Pushed" >> "$GITHUB_STEP_SUMMARY"
-          echo "- \`${IMAGE}:${{ steps.tag.outputs.value }}\`" >> "$GITHUB_STEP_SUMMARY"
+          cd deploy/overlays/production
+          kustomize edit set image \
+            "${REGISTRY}/${IMAGE_NAME}=${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "overlay 갱신 완료"
+          grep -A2 "^images:" kustomization.yaml || true
+
+      - name: Commit & push overlay change
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.value }}
+          TRIGGER_SHA: ${{ github.sha }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add deploy/overlays/production/kustomization.yaml
+          if git diff --staged --quiet; then
+            echo "변경 없음 — commit skip"
+            exit 0
+          fi
+
+          MSG=$(printf 'chore: bump image tag to %s\n\nUpdated by GitHub Actions\nCommit: %s\nWorkflow: %s' \
+            "$IMAGE_TAG" "$TRIGGER_SHA" "$WORKFLOW_NAME")
+          git commit -m "$MSG"
+
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push origin main; then
+              echo "push 성공"
+              exit 0
+            fi
+            echo "push 실패 — retry $i/5..."
+            sleep $((i * 2))
+          done
+          echo "push 5회 재시도 실패"
+          exit 1
+
+      - name: Summary
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          {
+            echo "## Pushed"
+            echo "- 이미지: \`${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}\`"
+            echo "- newTag 갱신: \`deploy/overlays/production/kustomization.yaml\`"
+            echo "- 후속: ArgoCD 가 overlay 변경 감지 → 클러스터 sync → Pod 재시작"
+          } >> "$GITHUB_STEP_SUMMARY"
