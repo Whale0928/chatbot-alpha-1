@@ -85,7 +85,7 @@ func (c *Client) ListCommits(ctx context.Context, owner, repo string, opts ListC
 		q.Set("sha", opts.Branch)
 	}
 
-	u := fmt.Sprintf("%s/repos/%s/%s/commits?%s", apiBase, owner, repo, q.Encode())
+	u := fmt.Sprintf("%s/repos/%s/%s/commits?%s", c.baseURL, owner, repo, q.Encode())
 	var all []Commit
 	for u != "" {
 		page, next, err := c.fetchCommitPage(ctx, u)

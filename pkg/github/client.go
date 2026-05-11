@@ -18,10 +18,12 @@ const (
 	userAgent = "chatbot-alpha-1"
 )
 
-// Client는 GitHub API 호출자. 토큰 한 개 + 공유 *http.Client 만 보관.
+// Client는 GitHub API 호출자. 토큰 + base URL + 공유 *http.Client 보관.
+// baseURL은 테스트에서 httptest.Server URL 주입용. 기본값은 apiBase.
 type Client struct {
-	token string
-	http  *http.Client
+	token   string
+	baseURL string
+	http    *http.Client
 }
 
 // NewClient는 personal access token으로 클라이언트를 만든다.
@@ -31,13 +33,45 @@ func NewClient(token string) (*Client, error) {
 		return nil, ErrMissingToken
 	}
 	return &Client{
-		token: token,
-		http:  &http.Client{Timeout: 15 * time.Second},
+		token:   token,
+		baseURL: apiBase,
+		http:    &http.Client{Timeout: 15 * time.Second},
+	}, nil
+}
+
+// NewClientForTest는 httptest.Server URL을 주입해 테스트용 클라이언트를 만든다.
+// 토큰은 dummy 가 허용되지만 빈 문자열은 거부 (Authorization 헤더 검증 일관성).
+func NewClientForTest(token, baseURL string) (*Client, error) {
+	if token == "" {
+		return nil, ErrMissingToken
+	}
+	if baseURL == "" {
+		return nil, fmt.Errorf("github: baseURL is empty")
+	}
+	return &Client{
+		token:   token,
+		baseURL: baseURL,
+		http:    &http.Client{Timeout: 5 * time.Second},
 	}, nil
 }
 
 // ErrMissingToken은 NewClient에 빈 토큰이 들어왔을 때 반환된다.
 var ErrMissingToken = fmt.Errorf("github: token is empty")
+
+// ErrNotFound 은 404 응답을 표현하는 sentinel. 호출자가 errors.Is 로 분기.
+var ErrNotFound = fmt.Errorf("github: not found")
+
+// ErrAlreadyExists 는 ref 생성 시 422 ("Reference already exists") 등 멱등 충돌.
+var ErrAlreadyExists = fmt.Errorf("github: already exists")
+
+// setCommonHeaders 는 모든 GitHub API 호출에 공통으로 붙는 Authorization/Accept/Api-Version/UA 를 세팅한다.
+// 신규 read/write API 들이 동일 헤더 블록을 반복하지 않도록 분리.
+func (c *Client) setCommonHeaders(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", userAgent)
+}
 
 // Repo는 GitHub repository 응답에서 봇이 실제로 사용하는 필드만.
 type Repo struct {
@@ -58,7 +92,7 @@ func (c *Client) ListOrgRepos(ctx context.Context, org string) ([]Repo, error) {
 	if org == "" {
 		return nil, fmt.Errorf("github: org is empty")
 	}
-	url := fmt.Sprintf("%s/orgs/%s/repos?per_page=100&type=all&sort=updated", apiBase, org)
+	url := fmt.Sprintf("%s/orgs/%s/repos?per_page=100&type=all&sort=updated", c.baseURL, org)
 	var all []Repo
 	for url != "" {
 		page, next, err := c.fetchRepoPage(ctx, url)

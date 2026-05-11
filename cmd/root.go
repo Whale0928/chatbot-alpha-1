@@ -36,5 +36,6 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newBotCmd(&envFile))
 	cmd.AddCommand(newLLMBotCmd(&envFile))
 	cmd.AddCommand(newGitBotCmd(&envFile))
+	cmd.AddCommand(newReleaseBotCmd(&envFile))
 	return cmd
 }

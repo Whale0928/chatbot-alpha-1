@@ -110,6 +110,11 @@ type Session struct {
 	// 에이전트 모드가 사용자 지시에 "이전 대화"를 인용할 때 LLM에 함께 보낸다.
 	// Pod 재시작 시 휘발(현재 세션 스토어 자체가 in-memory).
 	LastBotSummary string
+
+	// ReleaseCtx는 현재 릴리즈 흐름의 컨텍스트.
+	// 라인/모듈/bump 선택 단계에서 누적되고, 진행 단계와 폴링 단계(Slice 7)에서도 참조된다.
+	// nil은 진행 중인 릴리즈 흐름 없음.
+	ReleaseCtx *ReleaseContext
 }
 
 // =====================================================================
@@ -131,6 +136,11 @@ var (
 	// githubOrg는 ListOrgRepos 대상 organization slug. .env의 GITHUB_ORG에서 읽고
 	// 비었으면 default "bottle-note".
 	githubOrg string
+
+	// releaseTargetOwner / releaseTargetRepo는 [릴리즈] 흐름이 동작할 GitHub 레포.
+	// sandbox 검증은 chatbot 레포 자체이며 RELEASE_TARGET_* 환경변수로 override.
+	releaseTargetOwner = "Whale0928"
+	releaseTargetRepo  = "chatbot-alpha-1"
 )
 
 // =====================================================================
@@ -177,6 +187,15 @@ func Run(envFile string) error {
 	} else {
 		log.Println("GITHUB_TOKEN 미설정 — 주간 정리 기능 비활성화")
 	}
+
+	// 릴리즈 흐름 대상 레포 — 환경변수 override 허용.
+	if o := os.Getenv("RELEASE_TARGET_OWNER"); o != "" {
+		releaseTargetOwner = o
+	}
+	if r := os.Getenv("RELEASE_TARGET_REPO"); r != "" {
+		releaseTargetRepo = r
+	}
+	log.Printf("릴리즈 흐름 대상 레포: %s/%s", releaseTargetOwner, releaseTargetRepo)
 
 	s, err := discordgo.New("Bot " + token)
 	if err != nil {

@@ -797,6 +797,7 @@ func handleHome(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Sess
 		discordgo.Button{Label: "미팅", Style: discordgo.PrimaryButton, CustomID: "mode_meeting"},
 		discordgo.Button{Label: "주간 정리", Style: discordgo.PrimaryButton, CustomID: "mode_weekly"},
 		discordgo.Button{Label: "에이전트", Style: discordgo.SuccessButton, CustomID: customIDAgentBtn},
+		discordgo.Button{Label: "릴리즈", Style: discordgo.SecondaryButton, CustomID: customIDReleaseEntry},
 		discordgo.Button{Label: "상태 조회", Style: discordgo.SecondaryButton, CustomID: "mode_status"},
 	)
 }

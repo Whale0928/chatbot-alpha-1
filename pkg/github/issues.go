@@ -77,7 +77,7 @@ func (c *Client) ListIssues(ctx context.Context, owner, repo string, opts ListIs
 	q.Set("sort", "updated")
 	q.Set("direction", "desc")
 
-	u := fmt.Sprintf("%s/repos/%s/%s/issues?%s", apiBase, owner, repo, q.Encode())
+	u := fmt.Sprintf("%s/repos/%s/%s/issues?%s", c.baseURL, owner, repo, q.Encode())
 	var all []Issue
 	for u != "" {
 		page, next, err := c.fetchIssuePage(ctx, u)
@@ -112,7 +112,7 @@ func (c *Client) CloseIssue(ctx context.Context, owner, repo string, number int)
 	if number <= 0 {
 		return fmt.Errorf("github: invalid issue number: %d", number)
 	}
-	u := fmt.Sprintf("%s/repos/%s/%s/issues/%d", apiBase, owner, repo, number)
+	u := fmt.Sprintf("%s/repos/%s/%s/issues/%d", c.baseURL, owner, repo, number)
 	body := []byte(`{"state":"closed","state_reason":"completed"}`)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, u, bytesReader(body))

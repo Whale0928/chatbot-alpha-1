@@ -238,3 +238,13 @@ type WeeklyReportResponse struct {
 type AgentResponse struct {
 	Markdown string `json:"markdown" jsonschema_description:"사용자 지시에 대한 한국어 마크다운 답변. 데이터 dump에 근거하지 않는 추측 금지."`
 }
+
+// ReleaseNoteResponse는 릴리즈 PR 본문 LLM 생성 결과.
+//
+// 단일 markdown 필드. 시스템 프롬프트가 ### 헤더 컨벤션(신규/개선·버그 수정·내부·호환성 깨짐)을 강제한다.
+// 커밋 메시지에 없는 정보를 만들어내면 안 된다 (환각 금지).
+//
+// H1 헤더와 메타 풋터(비교 base, 커밋 수 등)는 Go renderer가 주입하므로 LLM은 ### 섹션부터 시작.
+type ReleaseNoteResponse struct {
+	Markdown string `json:"markdown" jsonschema_description:"릴리즈 노트 본문 마크다운. ### 섹션 헤더부터 시작. H1/H2 사용 금지(Go가 주입). 빈 섹션은 생략."`
+}

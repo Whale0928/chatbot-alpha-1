@@ -96,6 +96,19 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleWeeklyScopeSelect(s, i, scope)
 		return
 	}
+	// 릴리즈 흐름 prefix 매칭
+	if strings.HasPrefix(data.CustomID, customIDReleaseLinePrefix) {
+		handleReleaseLine(s, i, sess, strings.TrimPrefix(data.CustomID, customIDReleaseLinePrefix))
+		return
+	}
+	if strings.HasPrefix(data.CustomID, customIDReleaseModulePrefix) {
+		handleReleaseModule(s, i, sess, strings.TrimPrefix(data.CustomID, customIDReleaseModulePrefix))
+		return
+	}
+	if strings.HasPrefix(data.CustomID, customIDReleaseBumpPrefix) {
+		handleReleaseBump(s, i, sess, strings.TrimPrefix(data.CustomID, customIDReleaseBumpPrefix))
+		return
+	}
 
 	// 주간 follow-up 버튼들. weekly.go의 핸들러에 위임.
 	switch data.CustomID {
@@ -223,6 +236,16 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		sendWeeklyRepoButtons(s, channelID)
 	case customIDAgentBtn:
 		handleAgent(s, i, sess)
+	case customIDReleaseEntry:
+		handleReleaseEntry(s, i, sess)
+	case customIDReleaseConfirm:
+		handleReleaseConfirm(s, i, sess)
+	case customIDReleaseBackLine:
+		handleReleaseBackLine(s, i, sess)
+	case customIDReleaseBackModule:
+		handleReleaseBackModule(s, i, sess)
+	case customIDReleasePollStop:
+		handleReleasePollStop(s, i, sess)
 	case "mode_status":
 		respondInteractionWithStatus(s, i)
 		// 세션은 정리하지 않음 — 사용자가 [처음 메뉴]로 다른 작업 계속 가능.
@@ -298,6 +321,7 @@ func openThread(s *discordgo.Session, m *discordgo.MessageCreate, content string
 					discordgo.Button{Label: "미팅", Style: discordgo.PrimaryButton, CustomID: "mode_meeting"},
 					discordgo.Button{Label: "주간 정리", Style: discordgo.PrimaryButton, CustomID: "mode_weekly"},
 					discordgo.Button{Label: "에이전트", Style: discordgo.SuccessButton, CustomID: customIDAgentBtn},
+					discordgo.Button{Label: "릴리즈", Style: discordgo.SecondaryButton, CustomID: customIDReleaseEntry},
 					discordgo.Button{Label: "상태 조회", Style: discordgo.SecondaryButton, CustomID: "mode_status"},
 				},
 			},
