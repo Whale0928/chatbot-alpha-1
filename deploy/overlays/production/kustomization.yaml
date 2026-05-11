@@ -10,9 +10,10 @@ resources:
 generators:
 - ksops-generator.yaml
 
-# newTag는 .github/workflows/release.yml 이 main 푸시마다 main-{sha7} 형식으로 자동 갱신한다.
-# Image Updater 의존성 제거 — GitHub Actions 가 직접 kustomize edit set image 로 commit/push.
+# 실제 배포 이미지 tag 는 ArgoCD Image Updater(default-updater)가 application spec 에 직접 patch 한다
+# (writeBackConfig.method: argocd). 따라서 아래 newTag 는 fallback baseline 이며,
+# main 푸시 → release.yml 이 v*.*.* 태그를 새로 만들면 Image Updater 가 그 값으로 app spec 갱신.
 images:
 - name: docker-registry.bottle-note.com/chatbot-alpha-1
   newName: docker-registry.bottle-note.com/chatbot-alpha-1
-  newTag: main-bf0220e
+  newTag: v0.0.1
