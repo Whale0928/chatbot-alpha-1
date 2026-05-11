@@ -45,6 +45,10 @@ var slashCommands = []*discordgo.ApplicationCommand{
 		Name:        "session",
 		Description: "빈 봇 세션을 시작합니다 (@멘션과 동일한 메뉴)",
 	},
+	{
+		Name:        "release",
+		Description: "릴리즈 봇: 모듈/bump 선택 후 PR 생성 + 머지 추적",
+	},
 }
 
 // registerSlashCommands는 봇 기동 직후 명령어를 Discord에 등록한다.

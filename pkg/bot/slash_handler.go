@@ -29,6 +29,7 @@ const (
 	sessionEntryMeeting
 	sessionEntryWeekly
 	sessionEntryAgent
+	sessionEntryRelease
 )
 
 // handleSlashCommand는 InteractionApplicationCommand를 라우팅한다.
@@ -44,6 +45,8 @@ func handleSlashCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		startSlashSession(s, i, sessionEntryAgent, getStringOption(i, "instruction"))
 	case "session":
 		startSlashSession(s, i, sessionEntryHome, "")
+	case "release":
+		startSlashSession(s, i, sessionEntryRelease, "")
 	default:
 		respondInteractionEphemeral(s, i, fmt.Sprintf("알 수 없는 명령어: /%s", data.Name))
 	}
@@ -165,10 +168,28 @@ func enterSlashMode(s *discordgo.Session, sess *Session, entry sessionEntry, age
 			"에이전트 모드로 진입했습니다. 자유롭게 지시해주세요.\n"+
 				"예) `워크스페이스에서 인프라 관련 열려있는 이슈들 가져와`\n"+
 				"`취소` 입력 시 종료")
+
+	case sessionEntryRelease:
+		// 릴리즈 흐름은 라인 선택 prompt 부터. handleReleaseEntry 와 동일한 안내 + 컴포넌트.
+		if githubClient == nil {
+			s.ChannelMessageSend(sess.ThreadID, "GITHUB_TOKEN 이 설정되어 있지 않아 릴리즈 흐름을 시작할 수 없습니다.")
+			return
+		}
+		if llmClient == nil {
+			s.ChannelMessageSend(sess.ThreadID, "LLM 클라이언트가 초기화되지 않았습니다.")
+			return
+		}
+		sess.ReleaseCtx = &ReleaseContext{Owner: releaseTargetOwner, Repo: releaseTargetRepo}
+		if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
+			Content:    fmt.Sprintf("어떤 라인을 릴리즈할까요? (대상 레포: `%s/%s`)", releaseTargetOwner, releaseTargetRepo),
+			Components: releaseLineComponents(),
+		}); err != nil {
+			log.Printf("[slash/release] ERR send line prompt: %v", err)
+		}
 	}
 }
 
-// homeMenuComponents는 [처음 메뉴]에 노출되는 4 버튼 행을 만든다.
+// homeMenuComponents는 [처음 메뉴]에 노출되는 5 버튼 행을 만든다.
 // openThread/handleHome과 동일한 셋. 슬래시 /session에서 재사용한다.
 func homeMenuComponents() []discordgo.MessageComponent {
 	return []discordgo.MessageComponent{
@@ -177,6 +198,7 @@ func homeMenuComponents() []discordgo.MessageComponent {
 				discordgo.Button{Label: "미팅", Style: discordgo.PrimaryButton, CustomID: "mode_meeting"},
 				discordgo.Button{Label: "주간 정리", Style: discordgo.PrimaryButton, CustomID: "mode_weekly"},
 				discordgo.Button{Label: "에이전트", Style: discordgo.SuccessButton, CustomID: customIDAgentBtn},
+				discordgo.Button{Label: "릴리즈", Style: discordgo.SecondaryButton, CustomID: customIDReleaseEntry},
 				discordgo.Button{Label: "상태 조회", Style: discordgo.SecondaryButton, CustomID: "mode_status"},
 			},
 		},
@@ -192,6 +214,8 @@ func slashThreadName(entry sessionEntry) string {
 		return "주간 정리"
 	case sessionEntryAgent:
 		return "에이전트"
+	case sessionEntryRelease:
+		return "릴리즈"
 	default:
 		return "봇 세션"
 	}
@@ -206,6 +230,8 @@ func entryName(entry sessionEntry) string {
 		return "weekly"
 	case sessionEntryAgent:
 		return "agent"
+	case sessionEntryRelease:
+		return "release"
 	default:
 		return "home"
 	}
