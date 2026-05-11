@@ -72,6 +72,10 @@ type ReleaseContext struct {
 	// [폴링 중단] 클릭 시 PollCancel() 호출 → goroutine 종료.
 	PollMsgID  string
 	PollCancel context.CancelFunc
+
+	// LastStep 은 runReleaseFlow 에서 마지막으로 시도한 step 번호 (1-based, 0=시작전).
+	// 실패 시 renderReleaseProgress 에 -LastStep 으로 전달해 어디서 실패했는지 시각화.
+	LastStep int
 }
 
 // =====================================================================
@@ -333,6 +337,7 @@ func runReleaseFlow(s *discordgo.Session, sess *Session, rc *ReleaseContext) {
 	defer cancel()
 
 	updateProgress := func(step int, note string) {
+		rc.LastStep = step
 		_, err := s.ChannelMessageEdit(sess.ThreadID, rc.ProgressMsgID, renderReleaseProgress(rc, step, note))
 		if err != nil {
 			log.Printf("[릴리즈/progress] edit 실패 step=%d: %v", step, err)
@@ -426,25 +431,46 @@ func runReleaseFlow(s *discordgo.Session, sess *Session, rc *ReleaseContext) {
 		}
 	}
 
-	// Step 5: PR 생성
+	// Step 5: PR 생성 (또는 기존 open PR 본문 갱신 — 멱등 처리)
 	prTitle := fmt.Sprintf("[deploy] %s-v%s", rc.Module.Key, rc.NewVersion)
-	updateProgress(5, fmt.Sprintf("PR 생성 중 (base=%s ← head=main)...", rc.Module.ReleaseBranch))
-	pr, err := githubClient.CreatePullRequest(ctx, rc.Owner, rc.Repo, github.CreatePullRequestInput{
-		Title: prTitle,
-		Body:  prBody,
-		Head:  "main",
-		Base:  rc.Module.ReleaseBranch,
-	})
+	updateProgress(5, fmt.Sprintf("PR 생성/갱신 (base=%s ← head=main)...", rc.Module.ReleaseBranch))
+	existing, err := githubClient.ListPullRequestsByHead(ctx, rc.Owner, rc.Repo,
+		rc.Owner+":main", rc.Module.ReleaseBranch, "open")
 	if err != nil {
-		updateProgressError(s, sess, rc, fmt.Sprintf("CreatePullRequest 실패: %v", err))
+		updateProgressError(s, sess, rc, fmt.Sprintf("ListPullRequestsByHead 실패: %v", err))
 		return
+	}
+	var pr *github.PullRequest
+	if len(existing) > 0 {
+		// 동일 head/base open PR 이 이미 있음 → 본문 갱신만.
+		pr, err = githubClient.UpdatePullRequest(ctx, rc.Owner, rc.Repo, existing[0].Number, github.UpdatePullRequestInput{
+			Title: prTitle,
+			Body:  prBody,
+		})
+		if err != nil {
+			updateProgressError(s, sess, rc, fmt.Sprintf("UpdatePullRequest #%d 실패: %v", existing[0].Number, err))
+			return
+		}
+		log.Printf("[릴리즈] 기존 PR #%d 본문 갱신 (멱등) thread=%s", pr.Number, sess.ThreadID)
+	} else {
+		pr, err = githubClient.CreatePullRequest(ctx, rc.Owner, rc.Repo, github.CreatePullRequestInput{
+			Title: prTitle,
+			Body:  prBody,
+			Head:  "main",
+			Base:  rc.Module.ReleaseBranch,
+		})
+		if err != nil {
+			updateProgressError(s, sess, rc, fmt.Sprintf("CreatePullRequest 실패: %v", err))
+			return
+		}
 	}
 	rc.PRNumber = pr.Number
 	rc.PRURL = pr.HTMLURL
 	rc.PRHeadSHA = pr.Head.SHA
 
 	// 완료 — progress 메시지 최종 상태로 갱신 후 별도 결과 메시지 + [처음 메뉴]
-	_, err = s.ChannelMessageEdit(sess.ThreadID, rc.ProgressMsgID, renderReleaseProgress(rc, 6, ""))
+	rc.LastStep = len(releaseProgressSteps)
+	_, err = s.ChannelMessageEdit(sess.ThreadID, rc.ProgressMsgID, renderReleaseProgress(rc, len(releaseProgressSteps)+1, ""))
 	if err != nil {
 		log.Printf("[릴리즈/progress] 완료 edit 실패: %v", err)
 	}
@@ -457,8 +483,13 @@ func runReleaseFlow(s *discordgo.Session, sess *Session, rc *ReleaseContext) {
 }
 
 // updateProgressError는 진행 도중 실패 시 progress 메시지에 실패 표시 + [처음 메뉴] 첨부.
+// rc.LastStep 을 음수로 변환해 renderReleaseProgress 에 전달 — 어느 단계에서 막혔는지 시각화.
 func updateProgressError(s *discordgo.Session, sess *Session, rc *ReleaseContext, errMsg string) {
-	body := renderReleaseProgress(rc, -1, errMsg)
+	failedSignal := -rc.LastStep
+	if rc.LastStep == 0 {
+		failedSignal = -1 // 0 step 실패면 임의로 step 1 위치로 표시
+	}
+	body := renderReleaseProgress(rc, failedSignal, errMsg)
 	if _, err := s.ChannelMessageEdit(sess.ThreadID, rc.ProgressMsgID, body); err != nil {
 		log.Printf("[릴리즈/progress] error edit 실패: %v", err)
 	}
@@ -544,20 +575,38 @@ var releaseProgressSteps = []string{
 }
 
 // renderReleaseProgress는 단계별 진행 상태를 마크다운으로 그린다.
-// current 0 = 시작 (모든 단계 대기), -1 = 실패, 6 = 완료.
+//
+// current 의미:
+//
+//	0       : 시작 전 (모든 단계 ·)
+//	1..N    : N 번째 단계 진행 중 (▶)
+//	N+1     : 모든 단계 완료 (✓)
+//	음수    : -current 번째 단계에서 실패 (그 이전 ✓, 그 단계 ✗, 이후 ·)
+//
+// 실패 시 호출자는 rc.LastStep 값을 음수로 변환해 전달한다.
 func renderReleaseProgress(rc *ReleaseContext, current int, note string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "`릴리즈 진행 중` — **%s** v%s → v%s (%s)\n",
 		rc.Module.DisplayName, rc.PrevVersion, rc.NewVersion, rc.Bump)
 	fmt.Fprintf(&b, "비교: `%s` ↔ `main`\n\n", rc.PrevTag)
+
+	failedStep := 0
+	if current < 0 {
+		failedStep = -current
+	}
+
 	for idx, label := range releaseProgressSteps {
 		step := idx + 1
 		var marker string
 		switch {
-		case current == -1:
-			// 실패 — 진행한 단계까지는 ✓, 다음 단계는 ✗ (note 노출), 그 이후는 회색
-			// current=-1 단독으로는 어디서 실패했는지 모르지만 note 가 그 책임.
-			marker = "·"
+		case failedStep > 0:
+			if step < failedStep {
+				marker = "✓"
+			} else if step == failedStep {
+				marker = "✗"
+			} else {
+				marker = "·"
+			}
 		case current == 0:
 			marker = "·"
 		case step < current:
@@ -571,13 +620,13 @@ func renderReleaseProgress(rc *ReleaseContext, current int, note string) string 
 	}
 	if note != "" {
 		b.WriteString("\n")
-		if current == -1 {
-			fmt.Fprintf(&b, "**실패:** %s\n", note)
+		if failedStep > 0 {
+			fmt.Fprintf(&b, "**실패 (step %d):** %s\n", failedStep, note)
 		} else {
 			fmt.Fprintf(&b, "→ %s\n", note)
 		}
 	}
-	if current == 6 {
+	if current == len(releaseProgressSteps)+1 {
 		b.WriteString("\n✅ 완료. PR 링크는 아래에 따로 안내됩니다.\n")
 	}
 	return b.String()

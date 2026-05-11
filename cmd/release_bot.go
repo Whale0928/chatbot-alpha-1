@@ -303,19 +303,37 @@ func runReleaseBot(envFile, moduleKey string, bump release.BumpType, owner, repo
 		fmt.Printf("[release-bot] release branch %s 존재 — 그대로 사용\n", module.ReleaseBranch)
 	}
 
-	// 10) PR 생성
-	fmt.Printf("[release-bot] CreatePullRequest base=%s head=%s title=%q\n",
-		module.ReleaseBranch, head, prTitle)
-	pr, err := gh.CreatePullRequest(ctx, owner, repo, github.CreatePullRequestInput{
-		Title: prTitle,
-		Body:  rendered,
-		Head:  head,
-		Base:  module.ReleaseBranch,
-	})
+	// 10) PR 생성 (또는 기존 open PR 본문 갱신 — 멱등)
+	fmt.Printf("[release-bot] ListPullRequestsByHead %s ← %s ...\n", module.ReleaseBranch, head)
+	existing, err := gh.ListPullRequestsByHead(ctx, owner, repo,
+		owner+":"+head, module.ReleaseBranch, "open")
 	if err != nil {
-		return fmt.Errorf("CreatePullRequest 실패: %w", err)
+		return fmt.Errorf("ListPullRequestsByHead 실패: %w", err)
 	}
-	fmt.Printf("[release-bot] PR 생성 OK: #%d %s\n", pr.Number, pr.HTMLURL)
+	var pr *github.PullRequest
+	if len(existing) > 0 {
+		fmt.Printf("[release-bot] 기존 open PR #%d 발견 — 본문 갱신 (멱등)\n", existing[0].Number)
+		pr, err = gh.UpdatePullRequest(ctx, owner, repo, existing[0].Number, github.UpdatePullRequestInput{
+			Title: prTitle,
+			Body:  rendered,
+		})
+		if err != nil {
+			return fmt.Errorf("UpdatePullRequest #%d 실패: %w", existing[0].Number, err)
+		}
+	} else {
+		fmt.Printf("[release-bot] CreatePullRequest base=%s head=%s title=%q\n",
+			module.ReleaseBranch, head, prTitle)
+		pr, err = gh.CreatePullRequest(ctx, owner, repo, github.CreatePullRequestInput{
+			Title: prTitle,
+			Body:  rendered,
+			Head:  head,
+			Base:  module.ReleaseBranch,
+		})
+		if err != nil {
+			return fmt.Errorf("CreatePullRequest 실패: %w", err)
+		}
+	}
+	fmt.Printf("[release-bot] PR OK: #%d %s\n", pr.Number, pr.HTMLURL)
 
 	fmt.Println("\n[release-bot] 완료. GitHub 에서 직접 머지하세요 (auto-merge 비활성).")
 	return nil
