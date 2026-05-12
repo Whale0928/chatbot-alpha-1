@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // PullRequest 는 /pulls 응답에서 봇이 사용하는 필드만.
@@ -25,9 +26,11 @@ type PullRequest struct {
 		Ref string `json:"ref"`
 	} `json:"base"`
 
-	Mergeable      *bool  `json:"mergeable"`       // nil = GitHub 이 아직 계산 중
-	MergeableState string `json:"mergeable_state"` // "clean" / "blocked" / "dirty" / "unknown" / "unstable"
-	Merged         bool   `json:"merged"`
+	Mergeable      *bool      `json:"mergeable"`       // nil = GitHub 이 아직 계산 중
+	MergeableState string     `json:"mergeable_state"` // "clean" / "blocked" / "dirty" / "unknown" / "unstable"
+	Merged         bool       `json:"merged"`
+	MergedAt       *time.Time `json:"merged_at"`
+	MergeCommitSHA string     `json:"merge_commit_sha"`
 }
 
 // CreatePullRequestInput 는 PR 생성 입력.

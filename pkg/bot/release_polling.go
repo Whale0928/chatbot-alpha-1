@@ -40,7 +40,7 @@ const (
 func pollReleasePR(ctx context.Context, s *discordgo.Session, sess *Session, rc *ReleaseContext) {
 	// 초기 패널 전송 (loading state)
 	msg, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-		Content:    fmt.Sprintf("🔄 **PR #%d** 머지 추적을 시작합니다... (첫 갱신 대기)", rc.PRNumber),
+		Embeds:     []*discordgo.MessageEmbed{renderPollNotice(rc, colorWarn, "머지 추적 — 시작", "첫 갱신을 기다리는 중입니다.", "자동 갱신 중 · 머지 가능 시 자동 종료")},
 		Components: releasePollComponents(rc.PRURL, false),
 	})
 	if err != nil {
@@ -63,11 +63,11 @@ func pollReleasePR(ctx context.Context, s *discordgo.Session, sess *Session, rc 
 		select {
 		case <-ctx.Done():
 			// 사용자 [폴링 중단] 또는 봇 종료
-			finalizePollPanel(s, sess, rc, "🛑 폴링 중단됨. GitHub 에서 직접 머지 상태를 확인해주세요.", true)
+			finalizePollPanel(s, sess, rc, renderPollNotice(rc, colorWarn, "머지 추적 — 중단됨", "폴링이 중단되었습니다. GitHub 에서 직접 머지 상태를 확인해주세요.", "폴링 종료"))
 			return
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				finalizePollPanel(s, sess, rc, "⏱ 폴링 시간 초과 (30분). GitHub 에서 직접 확인해주세요.", true)
+				finalizePollPanel(s, sess, rc, renderPollNotice(rc, colorWarn, "머지 추적 — 시간 초과", "폴링 시간 초과 (30분). GitHub 에서 직접 확인해주세요.", "폴링 종료"))
 				return
 			}
 			if done := runOnePollCycle(ctx, s, sess, rc); done {
@@ -86,17 +86,17 @@ func runOnePollCycle(ctx context.Context, s *discordgo.Session, sess *Session, r
 	pr, err := githubClient.GetPullRequest(callCtx, rc.Owner, rc.Repo, rc.PRNumber)
 	if err != nil {
 		log.Printf("[릴리즈/polling] GetPullRequest 실패: %v", err)
-		updatePollPanel(s, sess, rc, fmt.Sprintf("⚠️ GetPullRequest 일시 실패: %v\n(다음 주기에서 재시도)", err), false)
+		updatePollPanel(s, sess, rc, renderPollNotice(rc, colorWarn, "머지 추적 — 조회 재시도", fmt.Sprintf("GetPullRequest 일시 실패: %v\n다음 주기에서 재시도합니다.", err), "자동 갱신 중 · 머지 가능 시 자동 종료"), false)
 		return false
 	}
 
 	// PR 종료 케이스 — merged 또는 closed without merge.
 	if pr.Merged {
-		finalizePollPanel(s, sess, rc, renderMergedSummary(rc, pr), true)
+		finalizePollPanel(s, sess, rc, renderMergedSummary(rc, pr))
 		return true
 	}
 	if pr.State == "closed" {
-		finalizePollPanel(s, sess, rc, fmt.Sprintf("🚫 **PR #%d** 가 머지되지 않고 닫혔습니다. (state=closed, merged=false)", rc.PRNumber), true)
+		finalizePollPanel(s, sess, rc, renderPollNotice(rc, colorBad, "머지 추적 — 닫힘", fmt.Sprintf("PR #%d 가 머지되지 않고 닫혔습니다. (state=closed, merged=false)", rc.PRNumber), "폴링 종료"))
 		return true
 	}
 
@@ -116,12 +116,12 @@ func runOnePollCycle(ctx context.Context, s *discordgo.Session, sess *Session, r
 
 	// 머지 가능(clean) 상태 도달 → 폴링 종료. 머지 자체는 사용자가 GitHub 에서 직접.
 	if pr.Mergeable != nil && *pr.Mergeable && pr.MergeableState == "clean" {
-		finalizePollPanel(s, sess, rc, renderReadyToMerge(rc, checks, reviews), false)
+		finalizePollPanel(s, sess, rc, renderReadyToMerge(rc, checks, reviews))
 		return true
 	}
 
-	body := renderPollPanel(rc, pr, checks, reviews)
-	updatePollPanel(s, sess, rc, body, false)
+	embed := renderPollPanel(rc, pr, checks, reviews)
+	updatePollPanel(s, sess, rc, embed, false)
 	return false
 }
 
@@ -149,11 +149,12 @@ func releasePollComponents(prURL string, stopped bool) []discordgo.MessageCompon
 }
 
 // updatePollPanel 은 폴링 메시지를 in-place 편집한다 (진행 중 상태).
-func updatePollPanel(s *discordgo.Session, sess *Session, rc *ReleaseContext, body string, stopped bool) {
+func updatePollPanel(s *discordgo.Session, sess *Session, rc *ReleaseContext, embed *discordgo.MessageEmbed, stopped bool) {
 	_, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
 		Channel:    sess.ThreadID,
 		ID:         rc.PollMsgID,
-		Content:    &body,
+		Content:    ptrString(""),
+		Embeds:     ptrEmbeds(embed),
 		Components: ptrComponents(releasePollComponents(rc.PRURL, stopped)),
 	})
 	if err != nil {
@@ -162,11 +163,12 @@ func updatePollPanel(s *discordgo.Session, sess *Session, rc *ReleaseContext, bo
 }
 
 // finalizePollPanel 은 폴링 종료 메시지를 출력하고 [폴링 중단] 버튼을 제거 + [처음 메뉴] 만 노출.
-func finalizePollPanel(s *discordgo.Session, sess *Session, rc *ReleaseContext, body string, stopped bool) {
+func finalizePollPanel(s *discordgo.Session, sess *Session, rc *ReleaseContext, embed *discordgo.MessageEmbed) {
 	_, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
 		Channel:    sess.ThreadID,
 		ID:         rc.PollMsgID,
-		Content:    &body,
+		Content:    ptrString(""),
+		Embeds:     ptrEmbeds(embed),
 		Components: ptrComponents(releasePollComponents(rc.PRURL, true)),
 	})
 	if err != nil {
@@ -175,7 +177,6 @@ func finalizePollPanel(s *discordgo.Session, sess *Session, rc *ReleaseContext, 
 	if rc.PollCancel != nil {
 		rc.PollCancel()
 	}
-	_ = stopped // 향후 stop reason 분기에 사용 가능 (현재는 메시지 본문에 통합)
 }
 
 // ptrComponents 는 discordgo.MessageEdit 의 Components 가 슬라이스 포인터를 요구하므로 보조.
@@ -183,134 +184,153 @@ func ptrComponents(cs []discordgo.MessageComponent) *[]discordgo.MessageComponen
 	return &cs
 }
 
+// ptrString 는 MessageEdit 의 문자열 포인터 필드용 보조 함수다.
+func ptrString(s string) *string {
+	return &s
+}
+
+// ptrEmbeds 는 MessageEdit 의 embed 포인터 필드용 보조 함수다.
+func ptrEmbeds(embed *discordgo.MessageEmbed) *[]*discordgo.MessageEmbed {
+	return &[]*discordgo.MessageEmbed{embed}
+}
+
 // =====================================================================
 // 패널 본문 렌더
 // =====================================================================
 
-// renderPollPanel 은 진행 중인 PR 상태를 한 메시지로 정리한다.
-// CI 진행은 progress bar + per-job 목록, 리뷰/머지는 한 줄씩.
-// 메타 정보(경과/주기/갱신 #)는 노출하지 않는다.
-func renderPollPanel(rc *ReleaseContext, pr *github.PullRequest, checks []github.CheckRun, reviews []github.Review) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "🔄 **PR #%d** 머지 추적 — `%s`\n\n",
-		rc.PRNumber, rc.Module.Key+"-v"+rc.NewVersion.String())
+// renderPollPanel 은 진행 중인 PR 상태를 embed 카드로 정리한다.
+func renderPollPanel(rc *ReleaseContext, pr *github.PullRequest, checks []github.CheckRun, reviews []github.Review) *discordgo.MessageEmbed {
+	passed, running, failed := groupChecks(checks)
+	passedCount := groupedCheckCount(passed)
+	runningCount := groupedCheckCount(running)
+	failedCount := groupedCheckCount(failed)
+	total := passedCount + runningCount + failedCount
+	done := passedCount + failedCount
 
-	b.WriteString("**CI Pipeline**\n")
-	b.WriteString(renderCIProgress(checks))
-	b.WriteString("\n")
-
-	b.WriteString("**리뷰**  ")
-	b.WriteString(summarizeReviews(reviews))
-	b.WriteString("\n")
-
-	b.WriteString("**머지**  ")
-	b.WriteString(summarizeMergeable(pr))
-	return b.String()
-}
-
-// renderReadyToMerge 는 머지 가능(clean) 도달 시 폴링을 종료하며 노출하는 최종 메시지.
-// CI/리뷰 모두 통과한 상태로 표시되고 사용자는 GitHub 에서 머지만 누르면 된다.
-func renderReadyToMerge(rc *ReleaseContext, checks []github.CheckRun, reviews []github.Review) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "✅ **PR #%d** 모든 게이트 통과 — GitHub 에서 머지하세요\n", rc.PRNumber)
-	fmt.Fprintf(&b, "릴리즈: `%s`\n\n", rc.NewTag)
-
-	b.WriteString("**CI Pipeline**\n")
-	b.WriteString(renderCIProgress(checks))
-	b.WriteString("\n")
-
-	b.WriteString("**리뷰**  ")
-	b.WriteString(summarizeReviews(reviews))
-	b.WriteString("\n")
-
-	b.WriteString("\n폴링을 종료합니다. 머지 후 알림이 필요하면 GitHub 알림을 켜두세요.\n")
-	return b.String()
-}
-
-// renderCIProgress 는 check-runs 를 progress bar + per-job 마커로 시각화한다.
-// 출력 예시:
-//
-//	`██████████░░░░░░░░░░` 50% (3/6)
-//	✓ ci pipeline / prepare
-//	✓ ci pipeline / unit-tests
-//	▶ ci pipeline / integration-tests
-//	⋯ ci pipeline / rule-tests
-const progressBarWidth = 20
-
-func renderCIProgress(checks []github.CheckRun) string {
-	if len(checks) == 0 {
-		return "_(아직 등록된 체크 없음)_\n"
+	stripe := colorWarn
+	title := "머지 추적 — 진행 중"
+	if failedCount > 0 {
+		stripe = colorBad
+		title = limitText(fmt.Sprintf("머지 추적 — 실패 (%s)", failed[0].Name), 256)
 	}
+
+	embed := releaseEmbed(stripe, releasePollAuthor(rc), title)
+	embed.Description = fmt.Sprintf("%s\n통과 %d · 진행 %d · 실패 %d",
+		progressBar(done, total), passedCount, runningCount, failedCount)
+	embed.Fields = []*discordgo.MessageEmbedField{
+		embedField(fmt.Sprintf("통과 (%d개)", passedCount), formatCheckLines("✓", passed), false),
+		embedField("진행 / 실패", formatRunningFailedLines(running, failed), false),
+		embedField("리뷰", limitText(summarizeReviews(reviews), 1024), true),
+		embedField("머지", limitText(summarizeMergeable(pr), 1024), true),
+	}
+	embed.Footer = &discordgo.MessageEmbedFooter{Text: "자동 갱신 중 · 머지 가능 시 자동 종료"}
+	return embed
+}
+
+// renderReadyToMerge 는 머지 가능(clean) 도달 시 노출하는 최종 embed 다.
+func renderReadyToMerge(rc *ReleaseContext, checks []github.CheckRun, reviews []github.Review) *discordgo.MessageEmbed {
 	total := len(checks)
-	completed := 0
-	failed := 0
-	for _, ch := range checks {
-		if ch.Status == "completed" {
-			completed++
-			switch ch.Conclusion {
-			case "failure", "timed_out", "action_required", "cancelled":
-				failed++
-			}
-		}
-	}
-	pct := 0
-	if total > 0 {
-		pct = completed * 100 / total
-	}
-	filled := completed * progressBarWidth / total
-	if filled > progressBarWidth {
-		filled = progressBarWidth
-	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", progressBarWidth-filled)
-
-	var b strings.Builder
-	prefix := "`" + bar + "`"
-	if failed > 0 {
-		fmt.Fprintf(&b, "%s ❌ %d/%d (실패 %d)\n", prefix, completed, total, failed)
-	} else if completed == total {
-		fmt.Fprintf(&b, "%s ✓ %d/%d (100%%)\n", prefix, completed, total)
-	} else {
-		fmt.Fprintf(&b, "%s ▶ %d/%d (%d%%)\n", prefix, completed, total, pct)
-	}
-	for _, ch := range checks {
-		fmt.Fprintf(&b, "%s %s\n", checkMarker(ch), ch.Name)
-	}
-	return b.String()
+	embed := releaseEmbed(colorOK, releasePollAuthor(rc), "머지 추적 — 머지 가능")
+	embed.Description = fmt.Sprintf("%s\n모든 체크 통과 · %s · 머지 상태 clean",
+		progressBar(total, total), summarizeReviews(reviews))
+	embed.Footer = &discordgo.MessageEmbedFooter{Text: "폴링 종료 · GitHub 에서 직접 머지"}
+	return embed
 }
 
-// checkMarker 는 단일 check-run 의 상태 아이콘을 반환한다.
-func checkMarker(ch github.CheckRun) string {
-	if ch.Status == "completed" {
-		switch ch.Conclusion {
-		case "success":
-			return "✓"
-		case "failure", "timed_out", "action_required", "cancelled":
-			return "✗"
-		case "neutral", "skipped":
-			return "—"
-		default:
-			return "·"
-		}
+// renderMergedSummary 는 PR 머지 완료 시 최종 embed 를 만든다.
+func renderMergedSummary(rc *ReleaseContext, pr *github.PullRequest) *discordgo.MessageEmbed {
+	base := pr.Base.Ref
+	if base == "" {
+		base = rc.Module.ReleaseBranch
 	}
-	if ch.Status == "in_progress" {
-		return "▶"
+	mergedAt := "알 수 없음"
+	if pr.MergedAt != nil {
+		mergedAt = pr.MergedAt.Local().Format("2006-01-02 15:04:05 MST")
 	}
-	return "⋯"
+	sha := pr.MergeCommitSHA
+	if sha == "" {
+		sha = "알 수 없음"
+	}
+
+	embed := releaseEmbed(colorOK, releasePollAuthor(rc), "머지 추적 — 머지 완료")
+	embed.Description = fmt.Sprintf("머지 시각 %s · 머지 SHA `%s` · base `%s`", mergedAt, sha, base)
+	embed.Footer = &discordgo.MessageEmbedFooter{Text: "폴링 종료"}
+	return embed
 }
 
-// renderMergedSummary 는 PR 머지 완료 시 최종 메시지.
-func renderMergedSummary(rc *ReleaseContext, pr *github.PullRequest) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "✅ **PR #%d** 머지 완료 — `%s`\n\n",
-		rc.PRNumber, rc.Module.Key+"-v"+rc.NewVersion.String())
-	fmt.Fprintf(&b, "• base: `%s` ← head: `main`\n", pr.Base.Ref)
-	if rc.Module.HasDeploy {
-		fmt.Fprintf(&b, "• 후속: `release/%s` 머지로 deploy_v2_release_* 워크플로우가 자동 트리거됩니다 (sandbox 라 실제 배포 영향은 없음).\n",
-			strings.TrimPrefix(rc.Module.ReleaseBranch, "release/"))
-	} else {
-		b.WriteString("• 주의: 모듈 HasDeploy=false — prod 자동배포 워크플로우 없음.\n")
+// renderPollNotice 는 오류/중단 같은 단일 상태 embed 를 만든다.
+func renderPollNotice(rc *ReleaseContext, stripe int, title, description, footer string) *discordgo.MessageEmbed {
+	embed := releaseEmbed(stripe, releasePollAuthor(rc), limitText(title, 256))
+	embed.Description = limitText(description, 4096)
+	embed.Footer = &discordgo.MessageEmbedFooter{Text: limitText(footer, 2048)}
+	return embed
+}
+
+// releasePollAuthor 는 라인/릴리즈/PR 정보를 author 라벨로 만든다.
+func releasePollAuthor(rc *ReleaseContext) string {
+	prefix := rc.Module.TagPrefix
+	if prefix == "" {
+		prefix = rc.Module.Key
 	}
-	return b.String()
+	return fmt.Sprintf("%s · %s/v%s · PR #%d", rc.Module.Line.String(), prefix, rc.NewVersion, rc.PRNumber)
+}
+
+// groupedCheckCount 는 묶인 check 개수 합계를 반환한다.
+func groupedCheckCount(groups []groupedCheck) int {
+	total := 0
+	for _, group := range groups {
+		total += group.Count
+	}
+	return total
+}
+
+// formatCheckLines 는 check 그룹을 mono field 값으로 만든다.
+func formatCheckLines(marker string, groups []groupedCheck) string {
+	lines := groupedCheckLines(marker, groups)
+	if len(lines) == 0 {
+		return "`없음`"
+	}
+	body := limitText(strings.Join(lines, "\n"), 1016)
+	return "```\n" + body + "\n```"
+}
+
+// formatRunningFailedLines 는 진행/실패 check 그룹을 field 값으로 만든다.
+func formatRunningFailedLines(running, failed []groupedCheck) string {
+	lines := groupedCheckLines("▶", running)
+	lines = append(lines, groupedCheckLines("✗", failed)...)
+	if len(lines) == 0 {
+		return "없음"
+	}
+	return limitText(strings.Join(lines, "\n"), 1024)
+}
+
+// groupedCheckLines 는 check 그룹을 마커가 붙은 줄 목록으로 변환한다.
+func groupedCheckLines(marker string, groups []groupedCheck) []string {
+	lines := make([]string, 0, len(groups))
+	for _, group := range groups {
+		name := group.Name
+		if name == "" {
+			name = "(이름 없음)"
+		}
+		line := fmt.Sprintf("%s %s", marker, name)
+		if group.Count > 1 {
+			line += fmt.Sprintf(" (×%d)", group.Count)
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// limitText 는 Discord embed 한도에 맞춰 문자열 길이를 제한한다.
+func limitText(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
 }
 
 // summarizeReviews 는 user 별 latest 리뷰만 살려 승인 수를 센다.
@@ -342,7 +362,7 @@ func summarizeReviews(reviews []github.Review) string {
 
 	switch {
 	case len(changes) > 0:
-		return fmt.Sprintf("⚠️ %d 명 변경 요청 (%s)", len(changes), joinTruncate(changes, 3))
+		return fmt.Sprintf("✗ %d 명 변경 요청 (%s)", len(changes), joinTruncate(changes, 3))
 	case len(approved) > 0:
 		return fmt.Sprintf("✓ %d 명 승인 (%s)", len(approved), joinTruncate(approved, 3))
 	default:
@@ -364,9 +384,9 @@ func summarizeMergeable(pr *github.PullRequest) string {
 	case "blocked":
 		return "✗ 블록됨 (state=blocked) — 필수 체크/리뷰 대기"
 	case "behind":
-		return "⚠️ behind (state=behind) — base 갱신 필요"
+		return "▶ behind (state=behind) — base 갱신 필요"
 	case "unstable":
-		return "⚠️ unstable — 일부 비필수 체크 실패"
+		return "▶ unstable — 일부 비필수 체크 실패"
 	default:
 		return fmt.Sprintf("? state=%s", pr.MergeableState)
 	}

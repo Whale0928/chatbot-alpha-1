@@ -6,64 +6,48 @@ import (
 	"time"
 
 	"chatbot-alpha-1/pkg/github"
+	"chatbot-alpha-1/pkg/release"
 )
 
-func TestRenderCIProgress(t *testing.T) {
-	cases := []struct {
-		name      string
-		checks    []github.CheckRun
-		wantIn    []string // 출력에 포함돼야 할 substring 들
-		wantNotIn []string
-	}{
-		{
-			"empty",
-			nil,
-			[]string{"등록된 체크 없음"},
-			nil,
-		},
-		{
-			"all success",
-			[]github.CheckRun{
-				{Name: "prepare", Status: "completed", Conclusion: "success"},
-				{Name: "unit", Status: "completed", Conclusion: "success"},
-			},
-			[]string{"████████████████████", "✓ 2/2", "100%", "✓ prepare", "✓ unit"},
-			[]string{"░"},
-		},
-		{
-			"partial running",
-			[]github.CheckRun{
-				{Name: "prepare", Status: "completed", Conclusion: "success"},
-				{Name: "unit", Status: "in_progress"},
-				{Name: "rule", Status: "queued"},
-			},
-			[]string{"▶ 1/3 (33%)", "✓ prepare", "▶ unit", "⋯ rule"},
-			nil,
-		},
-		{
-			"failure",
-			[]github.CheckRun{
-				{Name: "prepare", Status: "completed", Conclusion: "success"},
-				{Name: "unit", Status: "completed", Conclusion: "failure"},
-			},
-			[]string{"❌ 2/2 (실패 1)", "✓ prepare", "✗ unit"},
-			nil,
-		},
+func TestRenderPollPanelEmbed(t *testing.T) {
+	module, ok := release.FindModule("admin")
+	if !ok {
+		t.Fatal("admin module not found")
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := renderCIProgress(c.checks)
-			for _, s := range c.wantIn {
-				if !strings.Contains(got, s) {
-					t.Errorf("substring %q 누락\n%s", s, got)
-				}
-			}
-			for _, s := range c.wantNotIn {
-				if strings.Contains(got, s) {
-					t.Errorf("substring %q 가 들어있으면 안 됨\n%s", s, got)
-				}
-			}
-		})
+	rc := &ReleaseContext{
+		Module:     module,
+		NewVersion: release.Version{Major: 1, Minor: 1, Patch: 3},
+		PRNumber:   591,
+	}
+	pr := &github.PullRequest{Mergeable: boolPtr(true), MergeableState: "blocked"}
+	checks := []github.CheckRun{
+		{Name: "unit", Status: "completed", Conclusion: "success"},
+		{Name: "integration", Status: "in_progress"},
+		{Name: "rule", Status: "completed", Conclusion: "failure"},
+	}
+
+	got := renderPollPanel(rc, pr, checks, nil)
+
+	if got.Title != "머지 추적 — 실패 (rule)" {
+		t.Fatalf("title = %q", got.Title)
+	}
+	if got.Color != colorBad {
+		t.Fatalf("color = %#x", got.Color)
+	}
+	if got.Author == nil || got.Author.Name != "백엔드 · admin/v1.1.3 · PR #591" {
+		t.Fatalf("author = %#v", got.Author)
+	}
+	if !strings.Contains(got.Description, "통과 1 · 진행 1 · 실패 1") {
+		t.Fatalf("description = %q", got.Description)
+	}
+	if len(got.Fields) != 4 {
+		t.Fatalf("fields = %d", len(got.Fields))
+	}
+	if !strings.Contains(got.Fields[0].Value, "✓ unit") {
+		t.Fatalf("passed field = %q", got.Fields[0].Value)
+	}
+	if !strings.Contains(got.Fields[1].Value, "▶ integration") || !strings.Contains(got.Fields[1].Value, "✗ rule") {
+		t.Fatalf("running/failed field = %q", got.Fields[1].Value)
 	}
 }
 

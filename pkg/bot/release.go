@@ -289,27 +289,26 @@ func handleReleaseBump(s *discordgo.Session, i *discordgo.InteractionCreate, ses
 	sess.ReleaseCtx.NewVersion = newVer
 	sess.ReleaseCtx.NewTag = newVer.Tag(sess.ReleaseCtx.Module)
 
-	body := fmt.Sprintf(
-		"아래 작업을 진행합니다. 이상 없으면 [확인]을 눌러주세요.\n\n"+
-			"• 모듈: `%s` (%s)\n"+
-			"• 변경: `v%s` → `v%s` (%s)\n"+
-			"• 비교 base: `%s` ↔ `main`\n"+
-			"• 작업: VERSION + tag push → PR 생성 (LLM 본문) — auto-merge 없음, 머지는 직접",
-		sess.ReleaseCtx.Module.Key, sess.ReleaseCtx.Module.DisplayName,
-		sess.ReleaseCtx.PrevVersion, newVer, bump,
-		sess.ReleaseCtx.PrevTag)
 	confirmStyle := discordgo.SuccessButton
 	confirmLabel := "확인"
 	if bump == release.BumpMajor {
-		body = "⚠️ **메이저 버전은 호환성 깨짐을 의미합니다.** 정말 진행할까요?\n\n" + body
 		confirmStyle = discordgo.DangerButton
 		confirmLabel = "메이저 진행"
 	}
-	respondInteractionWithRow(s, i, body,
-		discordgo.Button{Label: confirmLabel, Style: confirmStyle, CustomID: customIDReleaseConfirm},
-		discordgo.Button{Label: "← 다시 선택", Style: discordgo.SecondaryButton, CustomID: customIDReleaseBackModule},
-		discordgo.Button{Label: "취소", Style: discordgo.SecondaryButton, CustomID: customIDHomeBtn},
-	)
+	embed := renderReleaseConfirmEmbed(sess.ReleaseCtx)
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Embeds: []*discordgo.MessageEmbed{embed},
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+					discordgo.Button{Label: confirmLabel, Style: confirmStyle, CustomID: customIDReleaseConfirm},
+					discordgo.Button{Label: "← 다시 선택", Style: discordgo.SecondaryButton, CustomID: customIDReleaseBackModule},
+					discordgo.Button{Label: "취소", Style: discordgo.SecondaryButton, CustomID: customIDHomeBtn},
+				}},
+			},
+		},
+	})
 }
 
 // =====================================================================
@@ -328,7 +327,9 @@ func handleReleaseConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, 
 		rc.Module.Key, rc.PrevVersion, rc.NewVersion))
 
 	// progress 메시지 초기 전송 — 이후 in-place edit
-	msg, err := s.ChannelMessageSend(sess.ThreadID, renderReleaseProgress(rc, 0, ""))
+	msg, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
+		Embeds: []*discordgo.MessageEmbed{renderReleaseProgress(rc, 0, "")},
+	})
 	if err != nil {
 		log.Printf("[릴리즈/progress] 초기 전송 실패 thread=%s: %v", sess.ThreadID, err)
 		return
@@ -346,7 +347,12 @@ func runReleaseFlow(s *discordgo.Session, sess *Session, rc *ReleaseContext) {
 
 	updateProgress := func(step int, note string) {
 		rc.LastStep = step
-		_, err := s.ChannelMessageEdit(sess.ThreadID, rc.ProgressMsgID, renderReleaseProgress(rc, step, note))
+		_, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+			Channel: sess.ThreadID,
+			ID:      rc.ProgressMsgID,
+			Content: ptrString(""),
+			Embeds:  ptrEmbeds(renderReleaseProgress(rc, step, note)),
+		})
 		if err != nil {
 			log.Printf("[릴리즈/progress] edit 실패 step=%d: %v", step, err)
 		}
@@ -478,7 +484,12 @@ func runReleaseFlow(s *discordgo.Session, sess *Session, rc *ReleaseContext) {
 
 	// 완료 — progress 메시지 최종 상태로 갱신 후 별도 결과 메시지 + [처음 메뉴]
 	rc.LastStep = len(releaseProgressSteps)
-	_, err = s.ChannelMessageEdit(sess.ThreadID, rc.ProgressMsgID, renderReleaseProgress(rc, len(releaseProgressSteps)+1, ""))
+	_, err = s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		Channel: sess.ThreadID,
+		ID:      rc.ProgressMsgID,
+		Content: ptrString(""),
+		Embeds:  ptrEmbeds(renderReleaseProgress(rc, len(releaseProgressSteps)+1, "")),
+	})
 	if err != nil {
 		log.Printf("[릴리즈/progress] 완료 edit 실패: %v", err)
 	}
@@ -497,17 +508,14 @@ func updateProgressError(s *discordgo.Session, sess *Session, rc *ReleaseContext
 	if rc.LastStep == 0 {
 		failedSignal = -1 // 0 step 실패면 임의로 step 1 위치로 표시
 	}
-	body := renderReleaseProgress(rc, failedSignal, errMsg)
-	if _, err := s.ChannelMessageEdit(sess.ThreadID, rc.ProgressMsgID, body); err != nil {
-		log.Printf("[릴리즈/progress] error edit 실패: %v", err)
-	}
-	if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-		Content: "실패 — 위 메시지에 사유 표시. 환경/권한 점검 후 다시 시도해주세요.",
-		Components: []discordgo.MessageComponent{
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}},
-		},
+	if _, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		Channel:    sess.ThreadID,
+		ID:         rc.ProgressMsgID,
+		Content:    ptrString(""),
+		Embeds:     ptrEmbeds(renderReleaseProgress(rc, failedSignal, errMsg)),
+		Components: ptrComponents([]discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}}}),
 	}); err != nil {
-		log.Printf("[릴리즈/result] error notice 전송 실패: %v", err)
+		log.Printf("[릴리즈/progress] error edit 실패: %v", err)
 	}
 	sess.ReleaseCtx = nil
 }
@@ -515,16 +523,12 @@ func updateProgressError(s *discordgo.Session, sess *Session, rc *ReleaseContext
 // sendReleaseResult는 완료 후 PR 본문 미리보기 + [PR 열기][처음 메뉴] 안내.
 // PR URL 은 plain text 가 아닌 LinkButton 으로 노출해 클릭 동선을 일관화.
 func sendReleaseResult(s *discordgo.Session, sess *Session, rc *ReleaseContext, prBody string) {
-	header := fmt.Sprintf("PR #%d 생성 완료 — `%s`\n머지는 GitHub 에서 직접 (auto-merge 사용 안 함).\n\n본문 미리보기는 아래 메시지.",
-		rc.PRNumber, rc.NewTag)
+	embed := renderReleaseResultEmbed(rc, prBody)
 	if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-		Content:    header,
+		Embeds:     []*discordgo.MessageEmbed{embed},
 		Components: releaseDoneComponents(rc.PRURL),
 	}); err != nil {
-		log.Printf("[릴리즈/result] header 전송 실패: %v", err)
-	}
-	if err := sendLongMessage(s, sess.ThreadID, prBody); err != nil {
-		log.Printf("[릴리즈/result] body 전송 실패: %v", err)
+		log.Printf("[릴리즈/result] 전송 실패: %v", err)
 	}
 	sess.LastBotSummary = prBody
 }
@@ -582,27 +586,69 @@ var releaseProgressSteps = []string{
 	"PR 생성 (auto-merge 없음)",
 }
 
-// renderReleaseProgress는 단계별 진행 상태를 마크다운으로 그린다.
-//
-// current 의미:
-//
-//	0       : 시작 전 (모든 단계 ·)
-//	1..N    : N 번째 단계 진행 중 (▶)
-//	N+1     : 모든 단계 완료 (✓)
-//	음수    : -current 번째 단계에서 실패 (그 이전 ✓, 그 단계 ✗, 이후 ·)
-//
-// 실패 시 호출자는 rc.LastStep 값을 음수로 변환해 전달한다.
-func renderReleaseProgress(rc *ReleaseContext, current int, note string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "`릴리즈 진행 중` — **%s** v%s → v%s (%s)\n",
-		rc.Module.DisplayName, rc.PrevVersion, rc.NewVersion, rc.Bump)
-	fmt.Fprintf(&b, "비교: `%s` ↔ `main`\n\n", rc.PrevTag)
+// renderReleaseConfirmEmbed 는 bump 선택 직후 확인 prompt embed 를 만든다.
+func renderReleaseConfirmEmbed(rc *ReleaseContext) *discordgo.MessageEmbed {
+	embed := releaseEmbed(
+		bumpColor(rc.Bump),
+		fmt.Sprintf("%s · %s (%s)", rc.Module.Line.String(), rc.Module.Key, rc.Module.DisplayName),
+		limitText(fmt.Sprintf("릴리즈 진행 확인 — v%s → v%s (%s)", rc.PrevVersion, rc.NewVersion, rc.Bump.String()), 256),
+	)
+	embed.Description = "아래 내용으로 진행합니다. 이상 없으면 **확인** 을 눌러주세요."
+	embed.Fields = []*discordgo.MessageEmbedField{
+		embedField("모듈", limitText(fmt.Sprintf("%s (%s)", rc.Module.Key, rc.Module.DisplayName), 1024), true),
+		embedField("Bump", limitText(fmt.Sprintf("%s · v%s", rc.Bump.String(), rc.NewVersion), 1024), true),
+		embedField("비교 base", limitText(fmt.Sprintf("`%s ↔ main`", rc.PrevTag), 1024), false),
+		embedField("작업", "VERSION commit → tag push → PR 생성 (LLM 본문)", false),
+	}
+	embed.Footer = &discordgo.MessageEmbedFooter{Text: "auto-merge 없음 · 머지는 GitHub 에서 직접"}
+	return embed
+}
 
+// renderReleaseProgress는 단계별 진행 상태를 embed 로 그린다.
+func renderReleaseProgress(rc *ReleaseContext, current int, note string) *discordgo.MessageEmbed {
 	failedStep := 0
 	if current < 0 {
 		failedStep = -current
 	}
+	total := len(releaseProgressSteps)
+	doneSteps := 0
+	runningSteps := 0
+	failedCount := 0
+	switch {
+	case failedStep > 0:
+		doneSteps = failedStep - 1
+		failedCount = 1
+	case current == total+1:
+		doneSteps = total
+	case current > 0:
+		doneSteps = current - 1
+		runningSteps = 1
+	}
 
+	stripe := colorWarn
+	titleSuffix := ""
+	footer := fmt.Sprintf("비교: %s ↔ main · PR 링크는 다음 카드", rc.PrevTag)
+	if failedStep > 0 {
+		stripe = colorBad
+		titleSuffix = fmt.Sprintf(" · 실패 (step %d)", failedStep)
+		footer = fmt.Sprintf("비교: %s ↔ main · 실패 step 확인 후 재시도", rc.PrevTag)
+	} else if current == total+1 {
+		stripe = colorOK
+		titleSuffix = " · 완료"
+	}
+
+	embed := releaseEmbed(
+		stripe,
+		fmt.Sprintf("%s · %s (%s)", rc.Module.Line.String(), rc.Module.Key, rc.Module.DisplayName),
+		limitText(fmt.Sprintf("릴리즈 진행 — v%s → v%s (%s)%s", rc.PrevVersion, rc.NewVersion, rc.Bump.String(), titleSuffix), 256),
+	)
+	countLine := fmt.Sprintf("완료 %d · 진행 %d", doneSteps, runningSteps)
+	if failedCount > 0 {
+		countLine += fmt.Sprintf(" · 실패 %d", failedCount)
+	}
+	embed.Description = fmt.Sprintf("%s\n%s", progressBar(doneSteps, total), countLine)
+
+	var b strings.Builder
 	for idx, label := range releaseProgressSteps {
 		step := idx + 1
 		var marker string
@@ -626,18 +672,41 @@ func renderReleaseProgress(rc *ReleaseContext, current int, note string) string 
 		}
 		fmt.Fprintf(&b, "%s %d. %s\n", marker, step, label)
 	}
-	if note != "" {
+	if failedStep > 0 && note != "" {
 		b.WriteString("\n")
-		if failedStep > 0 {
-			fmt.Fprintf(&b, "**실패 (step %d):** %s\n", failedStep, note)
-		} else {
-			fmt.Fprintf(&b, "→ %s\n", note)
+		fmt.Fprintf(&b, "실패 사유: %s\n", note)
+	}
+	embed.Fields = []*discordgo.MessageEmbedField{
+		embedField("단계", limitText(b.String(), 1024), false),
+	}
+	embed.Footer = &discordgo.MessageEmbedFooter{Text: limitText(footer, 2048)}
+	return embed
+}
+
+// renderReleaseResultEmbed 는 PR 완료와 LLM 본문 미리보기를 하나의 embed 로 만든다.
+func renderReleaseResultEmbed(rc *ReleaseContext, prBody string) *discordgo.MessageEmbed {
+	body := strings.TrimLeft(prBody, "\n")
+	if idx := strings.IndexByte(body, '\n'); idx >= 0 {
+		first := strings.TrimSpace(body[:idx])
+		heading := strings.TrimSpace(strings.TrimLeft(first, "# "))
+		if strings.HasPrefix(heading, "Release ") {
+			body = strings.TrimLeft(body[idx+1:], "\n")
+		}
+	} else {
+		heading := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(body), "# "))
+		if strings.HasPrefix(heading, "Release ") {
+			body = ""
 		}
 	}
-	if current == len(releaseProgressSteps)+1 {
-		b.WriteString("\n✅ 완료. PR 링크는 아래에 따로 안내됩니다.\n")
-	}
-	return b.String()
+	desc := fmt.Sprintf("비교 `%s ↔ main` 기준 LLM 초안 본문.\n\n%s", rc.PrevTag, body)
+	embed := releaseEmbed(
+		lineColor(rc.Module.Line),
+		fmt.Sprintf("%s · %s (%s) · %d commits", rc.Module.Line.String(), rc.Module.Key, rc.Module.DisplayName, rc.CommitCount),
+		limitText(fmt.Sprintf("PR #%d · Release %s v%s (%s)", rc.PRNumber, rc.Module.DisplayName, rc.NewVersion, rc.Bump.String()), 256),
+	)
+	embed.Description = limitText(desc, 4096)
+	embed.Footer = &discordgo.MessageEmbedFooter{Text: "봇 diff/커밋 기반 초안 · 머지 전 검토 후 필요 시 직접 편집"}
+	return embed
 }
 
 // followupErr는 deferred ack 이후 발생한 에러를 followup 메시지로 사용자에게 안내한다.
