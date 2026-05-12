@@ -12,47 +12,47 @@ func TestResolveLatestTag(t *testing.T) {
 	}{
 		{
 			name: "기본 매칭 - 단일 태그",
-			tags: []string{"sandbox-product/v1.0.0"},
-			want: "sandbox-product/v1.0.0",
+			tags: []string{"product/v1.0.0"},
+			want: "product/v1.0.0",
 		},
 		{
 			name: "여러 태그 중 최신 선택",
 			tags: []string{
-				"sandbox-product/v1.0.0",
-				"sandbox-product/v1.2.0",
-				"sandbox-product/v1.1.5",
+				"product/v1.0.0",
+				"product/v1.2.0",
+				"product/v1.1.5",
 			},
-			want: "sandbox-product/v1.2.0",
+			want: "product/v1.2.0",
 		},
 		{
 			name: "다른 모듈 태그 무시",
 			tags: []string{
-				"sandbox-admin/v9.9.9",
-				"sandbox-product/v1.0.0",
+				"admin/v9.9.9",
+				"product/v1.0.0",
 				"v0.5.0", // chatbot 자체 태그
 			},
-			want: "sandbox-product/v1.0.0",
+			want: "product/v1.0.0",
 		},
 		{
 			name: "pre-release 형식 무시",
 			tags: []string{
-				"sandbox-product/v1.0.0-rc1",
-				"sandbox-product/v0.9.0",
+				"product/v1.0.0-rc1",
+				"product/v0.9.0",
 			},
-			want: "sandbox-product/v0.9.0",
+			want: "product/v0.9.0",
 		},
 		{
 			name: "매칭 0개",
-			tags: []string{"v1.0.0", "sandbox-admin/v1.0.0"},
+			tags: []string{"v1.0.0", "admin/v1.0.0"},
 			want: "",
 		},
 		{
 			name: "major 우선",
 			tags: []string{
-				"sandbox-product/v1.99.99",
-				"sandbox-product/v2.0.0",
+				"product/v1.99.99",
+				"product/v2.0.0",
 			},
-			want: "sandbox-product/v2.0.0",
+			want: "product/v2.0.0",
 		},
 	}
 	for _, c := range cases {

@@ -80,7 +80,7 @@ func TestVersionTag(t *testing.T) {
 		t.Fatal("product 모듈 찾기 실패")
 	}
 	got := v.Tag(m)
-	want := "sandbox-product/v1.0.0"
+	want := "product/v1.0.0"
 	if got != want {
 		t.Errorf("Tag = %q, want %q", got, want)
 	}
@@ -130,12 +130,12 @@ func TestParseBumpType(t *testing.T) {
 	}
 }
 
-func TestSandboxModulesIntegrity(t *testing.T) {
-	if len(SandboxModules) == 0 {
-		t.Fatal("SandboxModules 비어있음")
+func TestModulesIntegrity(t *testing.T) {
+	if len(Modules) == 0 {
+		t.Fatal("Modules 비어있음")
 	}
 	seen := make(map[string]bool)
-	for _, m := range SandboxModules {
+	for _, m := range Modules {
 		if m.Key == "" {
 			t.Errorf("module %+v: Key 비어있음", m)
 		}
@@ -143,6 +143,12 @@ func TestSandboxModulesIntegrity(t *testing.T) {
 			t.Errorf("duplicate key: %s", m.Key)
 		}
 		seen[m.Key] = true
+		if m.Owner != "bottle-note" {
+			t.Errorf("module %s: Owner=%q, want \"bottle-note\"", m.Key, m.Owner)
+		}
+		if m.Repo == "" {
+			t.Errorf("module %s: Repo 비어있음", m.Key)
+		}
 		if m.VersionPath == "" {
 			t.Errorf("module %s: VersionPath 비어있음", m.Key)
 		}

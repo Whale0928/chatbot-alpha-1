@@ -179,9 +179,9 @@ func enterSlashMode(s *discordgo.Session, sess *Session, entry sessionEntry, age
 			s.ChannelMessageSend(sess.ThreadID, "LLM 클라이언트가 초기화되지 않았습니다.")
 			return
 		}
-		sess.ReleaseCtx = &ReleaseContext{Owner: releaseTargetOwner, Repo: releaseTargetRepo}
+		sess.ReleaseCtx = &ReleaseContext{}
 		if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-			Content:    fmt.Sprintf("어떤 라인을 릴리즈할까요? (대상 레포: `%s/%s`)", releaseTargetOwner, releaseTargetRepo),
+			Content:    "어떤 라인을 릴리즈할까요?",
 			Components: releaseLineComponents(),
 		}); err != nil {
 			log.Printf("[slash/release] ERR send line prompt: %v", err)

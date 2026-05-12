@@ -136,11 +136,6 @@ var (
 	// githubOrg는 ListOrgRepos 대상 organization slug. .env의 GITHUB_ORG에서 읽고
 	// 비었으면 default "bottle-note".
 	githubOrg string
-
-	// releaseTargetOwner / releaseTargetRepo는 [릴리즈] 흐름이 동작할 GitHub 레포.
-	// sandbox 검증은 chatbot 레포 자체이며 RELEASE_TARGET_* 환경변수로 override.
-	releaseTargetOwner = "Whale0928"
-	releaseTargetRepo  = "chatbot-alpha-1"
 )
 
 // =====================================================================
@@ -187,15 +182,6 @@ func Run(envFile string) error {
 	} else {
 		log.Println("GITHUB_TOKEN 미설정 — 주간 정리 기능 비활성화")
 	}
-
-	// 릴리즈 흐름 대상 레포 — 환경변수 override 허용.
-	if o := os.Getenv("RELEASE_TARGET_OWNER"); o != "" {
-		releaseTargetOwner = o
-	}
-	if r := os.Getenv("RELEASE_TARGET_REPO"); r != "" {
-		releaseTargetRepo = r
-	}
-	log.Printf("릴리즈 흐름 대상 레포: %s/%s", releaseTargetOwner, releaseTargetRepo)
 
 	s, err := discordgo.New("Bot " + token)
 	if err != nil {

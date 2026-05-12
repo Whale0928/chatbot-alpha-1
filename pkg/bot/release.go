@@ -91,9 +91,9 @@ func handleReleaseEntry(s *discordgo.Session, i *discordgo.InteractionCreate, se
 		respondInteraction(s, i, "LLM 클라이언트가 초기화되지 않았습니다.")
 		return
 	}
-	sess.ReleaseCtx = &ReleaseContext{Owner: releaseTargetOwner, Repo: releaseTargetRepo}
+	sess.ReleaseCtx = &ReleaseContext{}
 	respondInteractionWithComponents(s, i,
-		fmt.Sprintf("어떤 라인을 릴리즈할까요? (대상 레포: `%s/%s`)", releaseTargetOwner, releaseTargetRepo),
+		"어떤 라인을 릴리즈할까요?",
 		releaseLineComponents(),
 	)
 }
@@ -117,26 +117,32 @@ func handleReleaseLine(s *discordgo.Session, i *discordgo.InteractionCreate, ses
 		respondInteraction(s, i, "릴리즈 컨텍스트가 만료되었습니다. [처음 메뉴]에서 다시 시작해주세요.")
 		return
 	}
+	var (
+		line  release.Line
+		label string
+	)
 	switch lineTok {
 	case "be":
-		modules := release.ModulesByLine(release.LineBackend)
-		if len(modules) == 0 {
-			respondInteraction(s, i, "백엔드 sandbox 모듈이 등록되어 있지 않습니다.")
-			return
-		}
-		respondInteractionWithComponents(s, i,
-			"백엔드 — 어느 모듈을 릴리즈할까요?",
-			releaseModuleComponents(modules),
-		)
+		line, label = release.LineBackend, "백엔드"
 	case "fe":
+		line, label = release.LineFrontend, "프론트엔드"
+	default:
+		respondInteraction(s, i, fmt.Sprintf("알 수 없는 라인: %q", lineTok))
+		return
+	}
+	modules := release.ModulesByLine(line)
+	if len(modules) == 0 {
 		respondInteractionWithRow(s, i,
-			"프론트엔드 sandbox 모듈은 아직 등록되지 않았습니다. (현재 검증은 백엔드 한정)",
+			fmt.Sprintf("%s 라인에 등록된 모듈이 없습니다.", label),
 			discordgo.Button{Label: "← 라인 다시", Style: discordgo.SecondaryButton, CustomID: customIDReleaseEntry},
 			homeButton(),
 		)
-	default:
-		respondInteraction(s, i, fmt.Sprintf("알 수 없는 라인: %q", lineTok))
+		return
 	}
+	respondInteractionWithComponents(s, i,
+		fmt.Sprintf("%s — 어느 모듈을 릴리즈할까요?", label),
+		releaseModuleComponents(modules),
+	)
 }
 
 // releaseModuleComponents는 모듈 버튼 + [라인 다시] 버튼 행을 만든다.
@@ -172,6 +178,8 @@ func handleReleaseModule(s *discordgo.Session, i *discordgo.InteractionCreate, s
 		return
 	}
 	sess.ReleaseCtx.Module = module
+	sess.ReleaseCtx.Owner = module.Owner
+	sess.ReleaseCtx.Repo = module.Repo
 
 	// 사용자 응답이 3초 안에 와야 하므로 일단 defer로 ack
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -542,7 +550,7 @@ func releaseDoneComponents(prURL string) []discordgo.MessageComponent {
 
 func handleReleaseBackLine(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
 	if sess.ReleaseCtx == nil {
-		sess.ReleaseCtx = &ReleaseContext{Owner: releaseTargetOwner, Repo: releaseTargetRepo}
+		sess.ReleaseCtx = &ReleaseContext{}
 	}
 	respondInteractionWithComponents(s, i,
 		"어떤 라인을 릴리즈할까요?",

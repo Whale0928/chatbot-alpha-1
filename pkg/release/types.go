@@ -74,6 +74,8 @@ type Module struct {
 	Key           string // CLI/식별자용: "product", "admin", "batch"
 	Line          Line
 	DisplayName   string // 한글 라벨: "프로덕트"
+	Owner         string // GitHub 레포 owner
+	Repo          string // GitHub 레포 이름
 	VersionPath   string // 레포 루트 기준 상대 경로
 	TagPrefix     string // 태그 prefix: "sandbox-product" → 태그는 "sandbox-product/v1.0.0"
 	ReleaseBranch string // 릴리즈 PR 의 base 브랜치
@@ -163,42 +165,85 @@ func (v Version) Compare(o Version) int {
 	return 0
 }
 
-// SandboxModules 는 chatbot 자체 레포 안에서 굴리는 검증용 모듈 레지스트리.
-// 실제 보틀노트 모듈과 분리하기 위해 TagPrefix 에 "sandbox-" 를 붙인다.
-// chatbot 의 release 워크플로우는 "v*.*.*" 매칭이라 이 prefix 와 충돌하지 않는다.
-var SandboxModules = []Module{
+// Modules 는 실제 보틀노트 운영 레포의 릴리즈 모듈 레지스트리.
+//
+// 1차 도입 범위는 **백엔드 라인 한정** — 백엔드 모듈들은 동일 모노레포(bottle-note-api-server)의
+// 서브디렉토리이며 태그/브랜치 컨벤션이 일관된다 ("{prefix}/v1.2.3", release/{prefix}).
+//
+// 프론트엔드 라인(frontend, dashboard)은 운영 합의 후 등록한다. 아래 TODO 블록 참고.
+//
+// 주의: batch 는 아직 git tag 도, release/batch 브랜치도 존재하지 않는다.
+// 첫 릴리즈 케이스를 봇 흐름이 지원하지 않으므로 일단 등록에서 제외했다.
+var Modules = []Module{
 	{
 		Key:           "product",
 		Line:          LineBackend,
 		DisplayName:   "프로덕트",
-		VersionPath:   "testdata/release-sandbox/product/VERSION",
-		TagPrefix:     "sandbox-product",
-		ReleaseBranch: "release/sandbox-product",
+		Owner:         "bottle-note",
+		Repo:          "bottle-note-api-server",
+		VersionPath:   "bottlenote-product-api/VERSION",
+		TagPrefix:     "product",
+		ReleaseBranch: "release/product",
 		HasDeploy:     true,
 	},
 	{
 		Key:           "admin",
 		Line:          LineBackend,
 		DisplayName:   "어드민",
-		VersionPath:   "testdata/release-sandbox/admin/VERSION",
-		TagPrefix:     "sandbox-admin",
-		ReleaseBranch: "release/sandbox-admin",
+		Owner:         "bottle-note",
+		Repo:          "bottle-note-api-server",
+		VersionPath:   "bottlenote-admin-api/VERSION",
+		TagPrefix:     "admin",
+		ReleaseBranch: "release/admin",
 		HasDeploy:     true,
 	},
-	{
-		Key:           "batch",
-		Line:          LineBackend,
-		DisplayName:   "배치",
-		VersionPath:   "testdata/release-sandbox/batch/VERSION",
-		TagPrefix:     "sandbox-batch",
-		ReleaseBranch: "release/sandbox-batch",
-		HasDeploy:     false,
-	},
+	// TODO(batch): batch 모듈 측 정비 후 등록.
+	// 필요한 사전 조건:
+	//   1. 초기 git tag (예: batch/v0.0.0) — 현재 ListTags 결과 batch/* 없음
+	//   2. release/batch 브랜치 생성 + protected 설정
+	//   3. 배포 자동화 합의 (HasDeploy true/false)
+	// 위 3개가 정해지면 아래 블록을 살리면 된다.
+	// {
+	//     Key:           "batch",
+	//     Line:          LineBackend,
+	//     DisplayName:   "배치",
+	//     Owner:         "bottle-note",
+	//     Repo:          "bottle-note-api-server",
+	//     VersionPath:   "bottlenote-batch/VERSION",
+	//     TagPrefix:     "batch",
+	//     ReleaseBranch: "release/batch",
+	//     HasDeploy:     false,
+	// },
+	// TODO(frontend): 프론트엔드 라인 도입 시 등록.
+	// 별도 레포(bottle-note-frontend, admin-dashboard)라 owner/repo 가 백엔드와 다르다.
+	// dashboard 는 아직 git tag 자체가 없어 TagPrefix 합의(기본안: "dashboard") 필요.
+	// {
+	//     Key:           "frontend",
+	//     Line:          LineFrontend,
+	//     DisplayName:   "프론트엔드",
+	//     Owner:         "bottle-note",
+	//     Repo:          "bottle-note-frontend",
+	//     VersionPath:   "VERSION",
+	//     TagPrefix:     "frontend",
+	//     ReleaseBranch: "release",
+	//     HasDeploy:     true,
+	// },
+	// {
+	//     Key:           "dashboard",
+	//     Line:          LineFrontend,
+	//     DisplayName:   "어드민 대시보드",
+	//     Owner:         "bottle-note",
+	//     Repo:          "admin-dashboard",
+	//     VersionPath:   "VERSION",
+	//     TagPrefix:     "dashboard",
+	//     ReleaseBranch: "release/dashboard",
+	//     HasDeploy:     true,
+	// },
 }
 
-// FindModule은 key 로 SandboxModules 에서 모듈을 찾는다.
+// FindModule은 key 로 모듈을 찾는다.
 func FindModule(key string) (Module, bool) {
-	for _, m := range SandboxModules {
+	for _, m := range Modules {
 		if m.Key == key {
 			return m, true
 		}
@@ -208,8 +253,8 @@ func FindModule(key string) (Module, bool) {
 
 // ModulesByLine은 라인 필터로 모듈 목록을 돌려준다.
 func ModulesByLine(line Line) []Module {
-	out := make([]Module, 0, len(SandboxModules))
-	for _, m := range SandboxModules {
+	out := make([]Module, 0, len(Modules))
+	for _, m := range Modules {
 		if m.Line == line {
 			out = append(out, m)
 		}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"chatbot-alpha-1/pkg/github"
@@ -72,10 +73,10 @@ func newReleaseBotCmd(envFileRef *string) *cobra.Command {
 		SilenceUsage: true,
 	}
 
-	cmd.Flags().StringVar(&moduleKey, "module", "", "릴리즈 대상 모듈 키 (product|admin|batch, 필수)")
+	cmd.Flags().StringVar(&moduleKey, "module", "", "릴리즈 대상 모듈 키 (sandbox: product|admin|batch / prod: product|admin|frontend|dashboard, 필수)")
 	cmd.Flags().StringVar(&bumpStr, "bump", "", "버전 bump 방식 (major|minor|patch, 필수)")
-	cmd.Flags().StringVar(&owner, "owner", "Whale0928", "GitHub 레포 owner (sandbox 검증은 chatbot 레포)")
-	cmd.Flags().StringVar(&repo, "repo", "chatbot-alpha-1", "GitHub 레포 이름")
+	cmd.Flags().StringVar(&owner, "owner", "", "GitHub 레포 owner (비우면 모듈 레지스트리의 값 사용)")
+	cmd.Flags().StringVar(&repo, "repo", "", "GitHub 레포 이름 (비우면 모듈 레지스트리의 값 사용)")
 	cmd.Flags().StringVar(&baseTag, "base-tag", "", "비교 base tag (비우면 ListTags 로 자동 결정)")
 	cmd.Flags().StringVar(&head, "head", "main", "비교 head ref (기본 main)")
 	cmd.Flags().StringVar(&directive, "directive", "", "LLM 추가 지시 (선택)")
@@ -95,7 +96,19 @@ func runReleaseBot(envFile, moduleKey string, bump release.BumpType, owner, repo
 
 	module, ok := release.FindModule(moduleKey)
 	if !ok {
-		return fmt.Errorf("알 수 없는 --module=%q (등록된 sandbox 모듈: product|admin|batch)", moduleKey)
+		keys := make([]string, 0, len(release.Modules))
+		for _, m := range release.Modules {
+			keys = append(keys, m.Key)
+		}
+		return fmt.Errorf("알 수 없는 --module=%q (등록된 모듈: %s)", moduleKey, strings.Join(keys, "|"))
+	}
+
+	// owner/repo 미지정 시 모듈 레지스트리의 값을 사용.
+	if owner == "" {
+		owner = module.Owner
+	}
+	if repo == "" {
+		repo = module.Repo
 	}
 
 	ghToken := os.Getenv("GITHUB_TOKEN")
