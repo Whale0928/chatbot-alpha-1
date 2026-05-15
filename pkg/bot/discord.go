@@ -392,9 +392,12 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		defer cancel()
 		keep := FinalizeSummarized(ctx, s, summarizer, sess, time.Now())
 		if !keep {
-			log.Printf("[미팅/finalize_summarized] 세션 reset thread=%s", sess.ThreadID)
-			persistSessionClose(context.Background(), sess)
-			sess.DBSessionID = ""
+			// 운영 사고 fix (2026-05-15): 이전엔 sess.DBSessionID = "" 로 cleanup했으나, 직후 사용자가
+			// 정리본 메시지의 4 포맷 토글 button 누르면 HandleFormatToggle이 sess.DBSessionID == "" 감지로
+			// silent fallback ("정리본 데이터를 찾을 수 없습니다") 출력 + 봇이 응답 안 하는 것처럼 보임.
+			// → DBSessionID는 보존해 토글이 같은 SummarizedContent를 DB에서 조회 가능하게.
+			// in-memory corpus(Notes/Speakers)와 sticky만 reset (다음 미팅 준비).
+			log.Printf("[미팅/finalize_summarized] 세션 corpus reset (DBSessionID 보존 — 토글 button 동작용) thread=%s", sess.ThreadID)
 			sess.Mode = ModeNormal
 			sess.State = StateSelectMode
 			sess.Notes = nil

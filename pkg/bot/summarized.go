@@ -392,12 +392,24 @@ func HandleFormatToggle(
 
 	format, ok := formatFromToggleCustomID(customID)
 	if !ok {
+		logGuard("meeting/format_toggle", "unknown_custom_id", "포맷 토글 customID 매칭 실패",
+			lf("thread", sess.ThreadID), lf("custom_id", customID))
 		sendFollowup("알 수 없는 포맷 토글입니다.")
 		return
 	}
 
 	if dbConn == nil || sess.DBSessionID == "" {
-		sendFollowup("정리본 데이터를 찾을 수 없습니다 (DB 미연결). 다시 [정리본 통합·토글] 버튼을 눌러주세요.")
+		// 운영 사고 fix (2026-05-15): 이전엔 silent return으로 디버깅 불가능 — 사용자 ephemeral followup만
+		// 받고 봇은 응답 안 하는 것처럼 보였음. logGuard로 진단 컨텍스트 박제.
+		reason := "db_nil"
+		if dbConn != nil {
+			reason = "db_session_id_empty"
+		}
+		logGuard("meeting/format_toggle", reason,
+			"DB 조회 불가 — 사용자에게 ephemeral 안내 + skip",
+			lf("thread", sess.ThreadID), lf("custom_id", customID),
+			lf("db_session_id", sess.DBSessionID))
+		sendFollowup("정리본 데이터를 찾을 수 없습니다 (DB 미연결 또는 세션 만료). 다시 [회의록 정리] 버튼을 눌러주세요.")
 		return
 	}
 
