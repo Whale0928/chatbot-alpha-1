@@ -35,11 +35,13 @@ func newSegmentID() string {
 //
 // 사용:
 //
-//	sa, err := BeginSubAction(ctx, sess, db.SegmentWeeklySummary)
-//	if err != nil { ... }
+//	sa := BeginSubAction(ctx, sess, db.SegmentWeeklySummary)
 //	defer sa.End(ctx, artifact)
 //	... 실제 sub-action 실행 ...
-//	sa.AppendResult(ctx, "[tool]", source, content)
+//	sa.AppendResult(ctx, sess, "[tool]", source, content)
+//
+// BeginSubAction은 항상 *SubActionContext를 반환한다 (DB persist 실패 시 SegmentID 빈 채로 fallback).
+// 에러는 log warn으로만 남고 호출자는 정상 흐름 진행.
 type SubActionContext struct {
 	SessionDBID string         // sess.DBSessionID 사본 (lifecycle 안전)
 	ThreadID    string

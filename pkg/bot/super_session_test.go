@@ -24,8 +24,9 @@ func TestSuperSessionStickyComponents_Row1HasFiveButtons(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ActionsRow at index 0, got %T", comps[0])
 	}
+	// Fatalf — 길이 mismatch 시 다음 인덱싱이 panic을 일으키지 않도록 즉시 중단.
 	if len(row1.Components) != 5 {
-		t.Errorf("row 1 button count = %d, want 5 (Discord row max)", len(row1.Components))
+		t.Fatalf("row 1 button count = %d, want 5 (Discord row max)", len(row1.Components))
 	}
 
 	// 정확한 customID 셋 — 순서/위치까지 검증 (UX 가시성)
@@ -54,8 +55,9 @@ func TestSuperSessionStickyComponents_Row2HasSessionEnd(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ActionsRow at index 1, got %T", comps[1])
 	}
+	// Fatalf — 길이가 맞아야 다음 인덱싱이 안전.
 	if len(row2.Components) != 1 {
-		t.Errorf("row 2 button count = %d, want 1 (세션 종료만)", len(row2.Components))
+		t.Fatalf("row 2 button count = %d, want 1 (세션 종료만)", len(row2.Components))
 	}
 	btn, ok := row2.Components[0].(discordgo.Button)
 	if !ok {

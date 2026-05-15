@@ -319,7 +319,10 @@ const (
 // 기존 [주간 정리]/[릴리즈]/[에이전트]는 메인 채널에서 새 스레드를 열지만, 새 sub-action button은
 // 미팅 스레드 안에서 in-place 실행되어 결과가 같은 corpus에 segment로 누적된다.
 //
-// 핸들러는 chunk 3B에서 구현 — 현재는 UI 정의만 (chunk 3A).
+// 현재 상태:
+//   - sub-action button (weekly/release/agent): discord.go에 stub 라우팅 존재, 안내 메시지만 응답.
+//     in-thread 실행은 chunk 3B-2b/c 후속.
+//   - session_end button: discord.go가 HandleSessionEnd 호출 — 명시 종료 본격 동작 (chunk 3D 완료).
 const (
 	customIDSubActionWeekly  = "subaction_weekly"  // [주간 추가]
 	customIDSubActionRelease = "subaction_release" // [릴리즈 추가]
