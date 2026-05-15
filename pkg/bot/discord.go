@@ -152,7 +152,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		sess.StickyMessageID = ""
 		sess.Directive = ""
 		log.Printf("[미팅/start] 미팅 모드 진입 thread=%s user=%s", sess.ThreadID, sess.UserID)
-		respondInteraction(s, i, "미팅을 시작합니다. 메시지를 자유롭게 입력하세요. 하단 [중간 요약] 버튼으로 진행 상황을 정리할 수 있고, [미팅 종료] 버튼 또는 \"미팅 종료\" 입력으로 마무리할 수 있습니다.")
+		respondInteraction(s, i, "미팅을 시작합니다. 자유롭게 메시지를 입력하세요. 하단 sticky 버튼으로 [중간 요약]/[주간 추가]/[릴리즈 추가]/[에이전트]/[노트 정리]를 같은 스레드에서 실행할 수 있고, [세션 종료]로 마무리할 수 있습니다. (\"미팅 종료\" 입력도 가능)")
 		// 초기 sticky 컨트롤 메시지 전송 - 맨 아래에 [중간 요약][미팅 종료] 버튼이 항상 보이도록.
 		sendSticky(s, sess)
 
@@ -210,6 +210,26 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		} else {
 			log.Printf("[미팅/end] 세션 보존 (재시도 대기) thread=%s", sess.ThreadID)
 		}
+
+	// === Phase 3 chunk 3B-1 — super-session sub-action button (stub) ===
+	// 본격 구현은 chunk 3B-2 (이 스레드 안에서 실행 + segment 누적, 같은 corpus에 합쳐짐).
+	// stub은 거시 결정 1(같은 스레드 컨테이너) 모델과 일관되게 안내 — 사용자에게 "메인 채널로 가라"
+	// 안내하지 않음 (그러면 컨텍스트 분리 = 결정 1 위반).
+	case customIDSubActionWeekly:
+		respondInteraction(s, i, "[주간 추가]는 이 스레드 안에서 주간 분석을 실행해 결과를 같은 corpus에 누적합니다. Phase 3 chunk 3B-2에서 활성화 예정입니다.")
+	case customIDSubActionRelease:
+		respondInteraction(s, i, "[릴리즈 추가]는 이 스레드 안에서 릴리즈 작업을 실행해 결과를 같은 corpus에 누적합니다. Phase 3 chunk 3B-2에서 활성화 예정입니다.")
+	case customIDSubActionAgent:
+		respondInteraction(s, i, "[에이전트]는 이 스레드 안에서 자유 자연어 지시를 실행해 결과를 같은 corpus에 누적합니다. Phase 3 chunk 3B-2에서 활성화 예정입니다.")
+
+	// === Phase 3 chunk 3D — 명시 [세션 종료] button ===
+	// finalize와 분리된 명시 종료. HandleSessionEnd가 sticky 제거 + DB close + in-memory 정리.
+	case customIDSessionEnd:
+		log.Printf("[세션/end] 클릭 thread=%s by=%s", sess.ThreadID, i.Member.User.Username)
+		respondInteraction(s, i, "세션을 종료합니다...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		HandleSessionEnd(ctx, s, sess)
 
 	// === Phase 2 chunk 3c — 정리본 메시지의 4 포맷 토글 button ===
 	// DB에서 SummarizedContent 조회 → 새 포맷 렌더 → 메시지 edit. LLM 재호출 없음.
@@ -349,13 +369,15 @@ func openThread(s *discordgo.Session, m *discordgo.MessageCreate, content string
 		return
 	}
 
+	now := time.Now()
 	sess := &Session{
 		Mode:      ModeNormal,
 		State:     StateSelectMode,
 		ThreadID:  thread.ID,
 		UserID:    m.Author.ID,
 		GuildID:   m.GuildID,
-		UpdatedAt: time.Now(),
+		UpdatedAt: now,
+		StartedAt: now, // Phase 3: lifecycle 경과 측정용 (UpdatedAt과 분리)
 	}
 	sessionsMu.Lock()
 	sessions[thread.ID] = sess

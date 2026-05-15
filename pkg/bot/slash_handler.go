@@ -102,13 +102,15 @@ func startSlashSession(s *discordgo.Session, i *discordgo.InteractionCreate, ent
 	}
 
 	userID := slashCallerUserID(i)
+	now := time.Now()
 	sess := &Session{
 		Mode:      ModeNormal,
 		State:     StateSelectMode,
 		ThreadID:  thread.ID,
 		UserID:    userID,
 		GuildID:   i.GuildID,
-		UpdatedAt: time.Now(),
+		UpdatedAt: now,
+		StartedAt: now, // Phase 3: lifecycle 경과 측정용
 	}
 	sessionsMu.Lock()
 	sessions[thread.ID] = sess
