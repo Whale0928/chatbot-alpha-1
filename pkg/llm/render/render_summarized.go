@@ -147,18 +147,32 @@ func writeMDBulletSection(b *strings.Builder, title string, items []string) {
 // formatter는 환각 방어 게이트 통과를 가정 — Origin이 Speakers 목록 안임을 보장하지 않으므로
 // 잘못된 입력이면 그대로 출력되지만 validate 단계에서 WARN log 남는다.
 func formatActionLine(a llm.SummaryAction) string {
+	// assignee 결정 — "개인 가시성"을 우선. 자기 발의에도 "BACKEND" 같은 그룹 라벨만 보여주면
+	// 실제 책임자가 누구인지 모호 (그룹은 사람이 아님 — Copilot review 지적사항).
+	// cross-role과 self를 명확히 분리:
+	//   - cross-role: 대상 표시 우선 (TargetUser/TargetRoles), 발화자는 from 메타
+	//   - self / ambiguous: 발화자(Origin) 우선 표시, from 메타 X (redundancy 회피)
+	isCrossRole := isCrossRoleAction(a)
 	var assignee string
 	switch {
-	case a.TargetUser != "" && len(a.TargetRoles) > 0:
-		// 개인 지목 + role 그룹 둘 다 명시 — 결정 5/B 그룹 정체성 가시성 보존.
-		// 예: "hyejungpark(FRONTEND) — ..." 형태로 어느 role 그룹 사람인지 즉시 식별.
+	case isCrossRole && a.TargetUser != "" && len(a.TargetRoles) > 0:
+		// cross-role 개인 지목 + role 둘 다 명시 — 그룹 정체성 가시성 보존.
+		// 예: "hyejungpark(FRONTEND) — ..."
 		assignee = fmt.Sprintf("%s(%s)", a.TargetUser, strings.Join(a.TargetRoles, ","))
-	case a.TargetUser != "":
+	case isCrossRole && a.TargetUser != "":
 		assignee = a.TargetUser
-	case len(a.TargetRoles) > 0:
+	case isCrossRole && len(a.TargetRoles) > 0:
+		// cross-role 그룹 대상 (개인 지목 X) — role 라벨 단독, 발화자는 from 메타.
 		assignee = strings.Join(a.TargetRoles, "/")
+	case a.Origin != "" && len(a.OriginRoles) > 0:
+		// self-initiated 또는 ambiguous — 발화자 + role.
+		// 예: "deadwhale(BACKEND) — 큐레이션 order ..."
+		assignee = fmt.Sprintf("%s(%s)", a.Origin, strings.Join(a.OriginRoles, ","))
 	case a.Origin != "":
 		assignee = a.Origin
+	case len(a.TargetRoles) > 0:
+		// 발화자 정보 0인 그룹 단위 액션 (드문 케이스).
+		assignee = strings.Join(a.TargetRoles, "/")
 	}
 
 	line := "[ ]"
@@ -167,9 +181,8 @@ func formatActionLine(a llm.SummaryAction) string {
 	}
 	line += " " + a.What
 
-	// 메타 (from / deadline) — origin과 target이 다른 경우에만 from 표시
+	// 메타 (from / deadline) — cross-role일 때만 from 표시 (self는 assignee가 이미 origin이라 redundancy).
 	var meta []string
-	isCrossRole := isCrossRoleAction(a)
 	if isCrossRole && a.Origin != "" {
 		if len(a.OriginRoles) > 0 {
 			meta = append(meta, fmt.Sprintf("from: %s(%s)", a.Origin, strings.Join(a.OriginRoles, ",")))

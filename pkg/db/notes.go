@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 )
@@ -197,5 +196,3 @@ func (d *DB) ListSegmentsBySession(ctx context.Context, sessionID string) ([]Seg
 	return out, nil
 }
 
-// 컴파일 타임에 ErrNotFound 사용 보장.
-var _ = errors.Is

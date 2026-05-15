@@ -428,10 +428,12 @@ func HandleFormatToggle(
 	}
 	if _, err := s.InteractionResponseEdit(i.Interaction, editMsg); err != nil {
 		log.Printf("[미팅/format_toggle] ERR InteractionResponseEdit thread=%s: %v", sess.ThreadID, err)
-		// fallback: ChannelMessageEdit (interaction이 deferred가 아닌 경우 대비)
+		// 사용자에게 보이지 않게 끝나면 안 됨 — ephemeral followup으로 명시 안내 + persist 스킵.
+		sendFollowup("정리본 메시지 갱신에 실패했습니다. 다시 토글 button을 눌러주세요.")
+		return
 	}
 
-	// FinalizeRun persist (이력)
+	// FinalizeRun persist (이력) — 메시지 edit 성공한 경우에만 (사용자가 실제로 본 결과만 audit).
 	PersistFinalizeRun(ctx, scRow.ID, formatToDBKind(format), "", rendered)
 
 	log.Printf("[미팅/format_toggle] 완료 thread=%s sc=%s format=%s rendered_bytes=%d",

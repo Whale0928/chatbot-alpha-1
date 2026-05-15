@@ -34,7 +34,7 @@ func TestProgress_FormatLine_ContainsAllFields(t *testing.T) {
 	// goroutine 시작 안 함 (Messenger 의존 X).
 	p := &Progress{
 		label:       "정리본 추출",
-		startedAt:   timeNowFor(t).Add(-12),
+		startedAt:   timeNowFor(t).Add(-12 * time.Second),
 		totalSteps:  6,
 		currentStep: 3,
 		currentMsg:  "응답 대기",

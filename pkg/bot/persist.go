@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"chatbot-alpha-1/pkg/db"
@@ -41,23 +42,26 @@ func classifyMessageSource(content string) db.NoteSource {
 	return db.SourceHuman
 }
 
-// newSessionID는 DB persist용 세션 ID를 생성한다.
-// 단일 봇 인스턴스(replicas:1) + 같은 ns에 두 세션 OPEN 가능성 사실상 0이므로 nano 단위로 충분.
+// idCounterPersist는 nano 충돌 방지용 atomic counter.
+// summarized.go의 idCounter와 같은 패턴 — 같은 ns에 두 호출이 들어와도 counter suffix로 unique.
 //
-// TODO(Phase 2+): bulk insert 시나리오나 다중 인스턴스 도입 시 crypto/rand 기반 ID 또는
-// 단조 카운터로 교체. PRIMARY KEY 충돌 시 InsertSession이 best-effort로 silently fail하므로
-// 충돌 빈도가 운영 임계 넘기 전에 reactive 모니터링 필요.
+// 별도 atomic 변수를 두는 이유: summarized.go의 idCounter와 import 순환 회피.
+// 단일 봇 인스턴스 가정 (replicas:1) — 다중 인스턴스 도입 시 instance prefix 추가.
+var idCounterPersist atomic.Uint64
+
+// newSessionID는 DB persist용 세션 ID를 생성한다.
+// 형식: sess_<unix_nano>_<counter> — 같은 ns 호출도 unique.
 func newSessionID() string {
-	return fmt.Sprintf("sess_%d", time.Now().UnixNano())
+	return fmt.Sprintf("sess_%d_%d", time.Now().UnixNano(), idCounterPersist.Add(1))
 }
 
-// newNoteID는 DB persist용 note ID 생성. 같은 세션 안에서 nano 단위 유일성으로 충분.
+// newNoteID는 DB persist용 note ID 생성.
+// 형식: note_<unix_nano>_<counter>.
 //
-// TODO(Phase 2+): 같은 ns에 두 메시지 도착 가능성은 messageCreate goroutine 직렬성 + Discord
-// gateway burst 패턴상 매우 낮지만, 0은 아님. 충돌 시 SQLite PRIMARY KEY 위반으로 best-effort
-// silently fail. ID 전략은 newSessionID와 함께 일괄 교체 권장.
+// 매 Discord 메시지마다 호출되어 nano 단독 ID로는 messageCreate burst나 동시 goroutine
+// (role-fetch path 등) 환경에서 PRIMARY KEY 충돌 위험. atomic counter로 차단.
 func newNoteID() string {
-	return fmt.Sprintf("note_%d", time.Now().UnixNano())
+	return fmt.Sprintf("note_%d_%d", time.Now().UnixNano(), idCounterPersist.Add(1))
 }
 
 // persistSessionStart는 새 세션을 DB에 기록한다 (best-effort).

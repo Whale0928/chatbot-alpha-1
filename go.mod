@@ -8,6 +8,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/openai/openai-go/v3 v3.35.0
 	github.com/spf13/cobra v1.10.2
+	modernc.org/sqlite v1.50.1
 )
 
 require (
@@ -34,5 +35,4 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.50.1 // indirect
 )

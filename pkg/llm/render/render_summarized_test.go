@@ -107,14 +107,16 @@ func TestRenderSummarizedDecisionStatus_CrossRoleActionShowsFromMetadata(t *test
 	}
 }
 
-func TestRenderSummarizedDecisionStatus_SelfRoleActionNoFromTag(t *testing.T) {
-	// deadwhale(BE)의 자기 발의는 from 메타 없음 — origin이 target과 같으면 redundancy 회피
+func TestRenderSummarizedDecisionStatus_SelfRoleActionShowsOriginNoFromTag(t *testing.T) {
+	// deadwhale(BE)의 자기 발의 — Copilot review 지적 반영:
+	// 그룹 라벨 단독 ("BACKEND —") 대신 발화자 + 그룹 ("deadwhale(BACKEND) —") 노출.
+	// from 메타는 self-initiated라 redundancy로 생략.
 	got := RenderSummarizedDecisionStatus(sampleInput(sample5_14Content()))
-	beActionLine := "BACKEND — 큐레이션 order spec 확장 / 관리자 order 제어 구현 (기한: 2026-05-21)"
+	beActionLine := "deadwhale(BACKEND) — 큐레이션 order spec 확장 / 관리자 order 제어 구현 (기한: 2026-05-21)"
 	if !strings.Contains(got, beActionLine) {
 		t.Errorf("자기 발의 액션 형식 다름 — want %q in:\n%s", beActionLine, got)
 	}
-	// from: deadwhale 표기는 자기 발의에는 등장하지 않아야 함
+	// from: deadwhale 표기는 자기 발의에는 등장하지 않아야 함 (assignee가 이미 origin)
 	if strings.Contains(got, "from: deadwhale") {
 		t.Error("자기 발의 액션에 from 메타가 잘못 등장 (cross-role detection 깨짐)")
 	}
@@ -227,11 +229,22 @@ func TestIsCrossRoleAction(t *testing.T) {
 	}
 }
 
-func TestFormatActionLine_AmbiguousTargetUsesOrigin(t *testing.T) {
-	// TargetRoles/TargetUser 둘 다 비면 Origin이 assignee로 등장
+func TestFormatActionLine_AmbiguousTargetUsesOriginWithRole(t *testing.T) {
+	// TargetRoles/TargetUser 둘 다 비고 OriginRoles가 있으면 Origin(Role) 형태로 표시
+	// (Copilot review 지적 — 그룹 식별성 + 개인 식별성 둘 다 보존).
 	a := llm.SummaryAction{What: "위스키 캐스크 완료", Origin: "kimjuye", OriginRoles: []string{"PM"}, Deadline: "2026-05-21"}
 	got := formatActionLine(a)
-	want := "[ ] kimjuye — 위스키 캐스크 완료 (기한: 2026-05-21)"
+	want := "[ ] kimjuye(PM) — 위스키 캐스크 완료 (기한: 2026-05-21)"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFormatActionLine_OriginOnlyWithoutRoles(t *testing.T) {
+	// OriginRoles가 비어있으면 Origin만 표시
+	a := llm.SummaryAction{What: "task", Origin: "alice"}
+	got := formatActionLine(a)
+	want := "[ ] alice — task"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
