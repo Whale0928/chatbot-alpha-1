@@ -119,6 +119,16 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 		}()
 	}
 
+	// === Phase 3 chunk 4 — progress 바 (super-session 전용) ===
+	var progress *Progress
+	if sess.Mode == ModeMeeting {
+		progressCtx, progressCancel := context.WithCancel(context.Background())
+		defer progressCancel()
+		progress = StartProgress(progressCtx, s, sess.ThreadID, "에이전트 실행", 4)
+		defer progress.Finish()
+		progress.SetStage(1, "GitHub 데이터 수집")
+	}
+
 	s.ChannelMessageSend(sess.ThreadID, "데이터 수집 중...")
 
 	ghCtx, ghCancel := context.WithTimeout(context.Background(), agentGitHubTimeout)
@@ -143,6 +153,9 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 	}
 	log.Printf("[agent/fetch] ok repos=%d issues=%d commits=%d", len(repos), totalIssues, totalCommits)
 
+	if progress != nil {
+		progress.SetStage(2, "LLM 호출 및 응답 대기")
+	}
 	s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("이슈 %d건 + 커밋 %d건 (%d 레포)을 분석하는 중...", totalIssues, totalCommits, len(repos)))
 
 	llmCtx, llmCancel := context.WithTimeout(context.Background(), agentLLMTimeout)
@@ -164,9 +177,15 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 	}
 	log.Printf("[agent/llm] ok elapsed=%s markdown_runes=%d", dur, len([]rune(resp.Markdown)))
 
+	if progress != nil {
+		progress.SetStage(3, "응답 처리")
+	}
 	rendered := strings.TrimSpace(resp.Markdown)
 	if rendered == "" {
 		rendered = "_(답변 본문이 비어있습니다)_"
+	}
+	if progress != nil {
+		progress.SetStage(4, "메시지 전송")
 	}
 	sendErr := sendLongMessage(s, sess.ThreadID, rendered)
 	if sendErr != nil {

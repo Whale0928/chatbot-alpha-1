@@ -17,11 +17,13 @@ func TestClassifyMessageSource(t *testing.T) {
 		{"empty", "", db.SourceHuman},
 		{"short normal", "큐레이션 화면은 제작 후 현기님께 전달완료", db.SourceHuman},
 		{"medium normal", strings.Repeat("가", 100), db.SourceHuman},
-		{"just below threshold (499 runes)", strings.Repeat("가", 499), db.SourceHuman},
-		{"at threshold (500 runes) → ExternalPaste", strings.Repeat("가", 500), db.SourceExternalPaste},
-		{"long paste (1500 runes)", strings.Repeat("가", 1500), db.SourceExternalPaste},
-		{"latin chars at threshold", strings.Repeat("a", 500), db.SourceExternalPaste},
-		{"mixed multi-byte just under (250 한 + 249 라)", strings.Repeat("가", 250) + strings.Repeat("a", 249), db.SourceHuman},
+		// 임계 1500자 (2026-05-15 운영 피드백 반영 — 본인 메모 1000자 범위 자동 분류 회귀 차단)
+		{"just below threshold (1499 runes)", strings.Repeat("가", 1499), db.SourceHuman},
+		{"at threshold (1500 runes) → ExternalPaste", strings.Repeat("가", 1500), db.SourceExternalPaste},
+		{"본인 노션 메모 1300자 (Human 유지)", strings.Repeat("가", 1300), db.SourceHuman},
+		{"long paste (3000 runes)", strings.Repeat("가", 3000), db.SourceExternalPaste},
+		{"latin chars at threshold", strings.Repeat("a", 1500), db.SourceExternalPaste},
+		{"mixed multi-byte just under (750 한 + 749 라)", strings.Repeat("가", 750) + strings.Repeat("a", 749), db.SourceHuman},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

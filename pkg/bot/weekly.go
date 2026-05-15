@@ -264,6 +264,18 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 		return
 	}
 
+	// === Phase 3 chunk 4 — progress 바 (super-session에서만 노출) ===
+	// 단계: GitHub fetch → LLM 호출 → render → 메시지 전송 → corpus 누적
+	// FinalizeSummarized와 동일 패턴 (1.5s 간격 edit, rate limit 안전).
+	var progress *Progress
+	if sess.Mode == ModeMeeting {
+		progressCtx, progressCancel := context.WithCancel(context.Background())
+		defer progressCancel()
+		progress = StartProgress(progressCtx, s, sess.ThreadID, fmt.Sprintf("주간 분석 (%s)", fullName), 4)
+		defer progress.Finish()
+		progress.SetStage(1, "GitHub 데이터 수집")
+	}
+
 	// 1) GitHub 데이터 수집 — scope에 따라 분기. 비포함 소스는 nil/0건으로 LLM에 전달된다.
 	ghCtx, ghCancel := context.WithTimeout(context.Background(), weeklyGitHubTimeout)
 	defer ghCancel()
@@ -303,6 +315,9 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 	}
 
 	// 2) LLM 분석
+	if progress != nil {
+		progress.SetStage(2, "LLM 호출 및 응답 대기")
+	}
 	s.ChannelMessageSend(sess.ThreadID, weeklyAnalyzingMessage(scope, len(issues), len(commits)))
 	llmCtx, llmCancel := context.WithTimeout(context.Background(), weeklyLLMTimeout)
 	defer llmCancel()
@@ -318,6 +333,9 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 	log.Printf("[주간/llm] ok repo=%s scope=%s elapsed=%s markdown_runes=%d closeable=%d",
 		fullName, scope, dur, len([]rune(resp.Markdown)), len(resp.Closeable))
 
+	if progress != nil {
+		progress.SetStage(3, "렌더링")
+	}
 	// 3) 렌더링 + 분할 전송. 마지막 chunk에 follow-up 버튼 첨부.
 	rendered := render.RenderWeekly(render.WeeklyRenderInput{
 		RepoFullName: fullName,
@@ -327,6 +345,9 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 		CommitCount:  len(commits),
 		Response:     resp,
 	})
+	if progress != nil {
+		progress.SetStage(4, "메시지 전송")
+	}
 	sendErr := func() error {
 		_, e := sendLongMessageWithComponents(s, sess.ThreadID, rendered, weeklyFollowupComponents(len(resp.Closeable), scope))
 		return e
@@ -418,7 +439,8 @@ func handleWeeklyDirective(s *discordgo.Session, i *discordgo.InteractionCreate,
 	sess.State = StateWeeklyAwaitDirective
 	respondInteraction(s, i,
 		"원하는 분석 방향을 한 메시지로 적어주세요.\n"+
-			"예) `프론트엔드 라벨 이슈만 / 라벨 정합성 더 깊게 / 닫아도 될 이슈 후보 더 보수적으로`")
+			"예) `프론트엔드 라벨 이슈만 / 라벨 정합성 더 깊게 / 닫아도 될 이슈 후보 더 보수적으로`\n"+
+			"_(빠져나가려면 `취소` 입력 — 미팅 발화로 복귀)_")
 }
 
 // handleWeeklyAwaitDirectiveMessage는 사용자가 directive 텍스트를 보냈을 때 호출된다.
@@ -431,11 +453,18 @@ func handleWeeklyAwaitDirectiveMessage(s *discordgo.Session, m *discordgo.Messag
 		return
 	}
 	if content == "취소" {
-		sess.State = StateSelectMode
-		s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
-			Content:    "추가 요청을 취소했습니다.",
-			Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}}},
-		})
+		// super-session: StateMeeting 유지 — 후속 발화가 corpus에 계속 누적.
+		// legacy: SelectMode + [처음 메뉴].
+		if sess.Mode == ModeMeeting {
+			sess.State = StateMeeting
+			s.ChannelMessageSend(m.ChannelID, "추가 요청을 취소했습니다. 미팅이 계속 진행 중입니다 (메시지를 자유롭게 입력하세요).")
+		} else {
+			sess.State = StateSelectMode
+			s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
+				Content:    "추가 요청을 취소했습니다.",
+				Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}}},
+			})
+		}
 		return
 	}
 	if sess.LastWeeklyRepo == "" {

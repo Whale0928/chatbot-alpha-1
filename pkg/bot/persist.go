@@ -21,11 +21,13 @@ import (
 //   - DB read는 봇 재시작 시 active session 복원에 사용 (Phase 1 후반에 추가).
 // =====================================================================
 
-// externalPasteThreshold는 외부 paste 자동 분류 임계 — 거시 디자인 결정 F (a) 500자.
+// externalPasteThreshold는 외부 paste 자동 분류 임계.
 //
-// 이 글자 수 이상의 발화는 자동으로 db.SourceExternalPaste로 분류 → action attribution
-// 후보에서 제외된다. 명시적 [외부 자료 첨부] 버튼은 별도 UI로 추가될 예정 (Phase 3).
-const externalPasteThreshold = 500
+// 운영 피드백 (2026-05-15) 반영: 초기 500자는 너무 공격적 — 본인 작업 메모(노션 export 등)도
+// 1000~1500자 범위라 자동 ExternalPaste로 잘못 분류되어 attribution 후보에서 제외되는 회귀 발생.
+// 1500자로 상향 — 일반 본인 발화는 거의 1500자 미만이고, 그 이상은 외부 회의록·문서 paste 가능성 높음.
+// 명시 의도가 있으면 [외부 자료 첨부] button (1회성 명시 분류) 사용 권장.
+const externalPasteThreshold = 1500
 
 // classifyMessageSource는 발화 길이로 NoteSource를 자동 결정한다 (pure).
 //
