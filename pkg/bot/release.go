@@ -61,6 +61,15 @@ const firstReleaseLabel = "(없음 — 첫 릴리즈)"
 // CompareCommits를 쓸 base 태그가 없으므로 임의 윈도우로 lookback. 30일이 기본 (운영 합의).
 const firstReleaseLookback = 30 * 24 * time.Hour
 
+// batchReleaseMaxModules는 [전체] batch UI가 한 메시지에 노출 가능한 최대 모듈 수.
+//
+// 제약: Discord 메시지는 최대 5개 ActionsRow를 가질 수 있고, batchReleaseModuleComponents가
+// 모듈마다 1 row(StringSelectMenu) + 마지막 [모두 진행] button row 1개를 사용 → 모듈 4개가 한도.
+// release.Modules가 5개 이상으로 커지면 메시지 전송이 silent로 실패하거나 일부 button이 누락될 위험.
+//
+// 해당 한도를 초과하면 handleReleaseLine("all")이 명시 reject — 페이징 UI는 향후 필요 시 도입.
+const batchReleaseMaxModules = 4
+
 // ReleaseContext는 진행 중인 릴리즈 흐름의 누적 상태.
 // 라인/모듈/bump 선택 단계에서 채워지고, 진행 단계 + 폴링 단계에서도 참조된다.
 type ReleaseContext struct {
@@ -243,6 +252,17 @@ func handleReleaseLine(s *discordgo.Session, i *discordgo.InteractionCreate, ses
 			logGuard("release/batch", "no_modules", "release.Modules 비어있음 — [전체] 진입 불가",
 				lf("thread", sess.ThreadID))
 			respondInteraction(s, i, "등록된 release 모듈이 없습니다 (pkg/release/types.go의 Modules 확인).")
+			return
+		}
+		// codex review 2차 (Copilot 2차 피드백): batch UI는 Discord row max 5 제약상 최대 batchReleaseMaxModules(4)
+		// 모듈만 노출 가능. 그 이상이면 silent 메시지 전송 실패/button 누락 위험 — 명시 reject.
+		if len(modules) > batchReleaseMaxModules {
+			logGuard("release/batch", "too_many_modules",
+				fmt.Sprintf("modules=%d > 한도 %d — Discord row 5 제약 위반 위험", len(modules), batchReleaseMaxModules),
+				lf("thread", sess.ThreadID), lf("modules", len(modules)), lf("max", batchReleaseMaxModules))
+			respondInteraction(s, i, fmt.Sprintf(
+				"등록 모듈 %d개가 [전체] UI 한도(%d개)를 초과합니다. Discord 메시지의 ActionsRow 5개 제약 때문에 한 화면에 노출 불가 — 단일 release를 모듈마다 진행하거나 release.Modules에서 일부 모듈을 제외해주세요.",
+				len(modules), batchReleaseMaxModules))
 			return
 		}
 		sess.BatchReleaseCtx = &BatchReleaseContext{
@@ -1037,7 +1057,8 @@ func followupErr(s *discordgo.Session, i *discordgo.InteractionCreate, msg strin
 // Discord 제약:
 //   - 한 메시지에 ActionsRow 최대 5개
 //   - StringSelectMenu는 ActionsRow 안에 단독 배치 (다른 컴포넌트와 같은 row에 못 둠)
-//   - 따라서 모듈 4개(=4 row) + button 1 row = 5 row 정확히 사용. 5개 초과 모듈 등록되면 깨짐.
+//   - 따라서 모듈 batchReleaseMaxModules(4)개 + button 1 row = 5 row 정확히 사용.
+//   - 한도 초과는 handleReleaseLine("all")이 진입 시점에 reject (silent 깨짐 방지).
 //
 // Selections 박제 상태가 있으면 Default 옵션으로 그 bump를 미리 선택해 보여준다 (in-place edit 후 재발사 시).
 func batchReleaseModuleComponents(bc *BatchReleaseContext) []discordgo.MessageComponent {
