@@ -133,10 +133,9 @@ func (rc *ReleaseContext) IsFirstRelease() bool {
 //   사용자 모듈별 StringSelectMenu 선택 → handleBatchReleaseSelect → Selections[module.Key] = bump
 //   [모두 진행] 클릭 → handleBatchReleaseStart → B-4 goroutine 병렬 발사
 type BatchReleaseContext struct {
-	Modules     []release.Module            // 대상 모듈 — release.Modules slice 그대로 (4개)
-	Selections  map[string]release.BumpType // module.Key → bump (없는 키 = 사용자 미선택 = 진행 시 skip)
-	PromptMsgID string                      // batch prompt 메시지 ID — selection 시 in-place edit으로 default 갱신
-	InProgress  bool                        // [모두 진행] 발사 후 true (race 방어 — 중복 클릭 reject)
+	Modules    []release.Module            // 대상 모듈 — release.Modules slice 그대로 (4개)
+	Selections map[string]release.BumpType // module.Key → bump (없는 키 = 사용자 미선택 = 진행 시 skip)
+	InProgress bool                        // [모두 진행] 발사 후 true (race 방어 — 중복 클릭 reject)
 }
 
 // HasAnySelection은 사용자가 1개라도 모듈 bump를 선택했는지 검사한다.
@@ -1028,12 +1027,11 @@ func batchReleasePromptHeader(bc *BatchReleaseContext) string {
 // sendBatchReleasePrompt는 batch release UI를 처음 띄울 때 사용한다.
 // 진입점: handleReleaseLine("all") 분기 끝.
 //
-// interaction 응답으로 메시지 생성 + 그 메시지 ID를 BatchReleaseCtx.PromptMsgID에 저장 (handleBatchReleaseSelect가
-// in-place edit 대상으로 사용). InteractionResponseChannelMessageWithSource는 message ID를 직접 반환하지 않으므로
-// 후속 InteractionResponse() → InteractionResponse 메시지 GET 흐름이 필요. 단순화 위해 ChannelMessageSendComplex로
-// 별도 메시지 만들고 interaction은 빈 ack만 응답.
+// 동작: deferred channel message ack → FollowupMessageCreate로 prompt 메시지 발사.
+// 후속 모듈별 SelectMenu 인터랙션은 handleBatchReleaseSelect가 InteractionResponseUpdateMessage로
+// 같은 메시지를 in-place edit하므로 별도 message ID 보관 불필요 (Discord interaction이 자체적으로
+// 트리거한 메시지를 추적한다).
 func sendBatchReleasePrompt(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
-	// interaction 즉시 ack — 본 UI 메시지는 별도 send (ChannelMessageSendComplex가 message ID 반환).
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	}); err != nil {
@@ -1049,7 +1047,6 @@ func sendBatchReleasePrompt(s *discordgo.Session, i *discordgo.InteractionCreate
 		log.Printf("[릴리즈/batch] prompt followup 실패 thread=%s: %v", sess.ThreadID, err)
 		return
 	}
-	sess.BatchReleaseCtx.PromptMsgID = msg.ID
 	log.Printf("[릴리즈/batch] prompt 발사 thread=%s msg=%s", sess.ThreadID, msg.ID)
 }
 

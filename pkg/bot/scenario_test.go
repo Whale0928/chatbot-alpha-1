@@ -65,12 +65,13 @@ func newScenarioBot(t *testing.T) *scenarioBot {
 
 // sendText는 사용자가 텍스트 메시지 입력하는 케이스를 시뮬레이션한다.
 //
+// D4 정책 (UX 재설계 2026-05): 모든 명령은 sticky button만, 텍스트 escape 폐기.
 // 실제 handleSession이 *discordgo.Session 받아 nil 호출 시 panic하므로, 시나리오는 handleSession의
 // 핵심 분기 로직만 fake Messenger 경유로 직접 시뮬레이션:
-//   1. universal escape (IsMeetingEndCommand) → HandleSessionEnd
-//   2. cancel command (IsCancelCommand) → state 복귀
-//   3. PendingExternalPasteUserID 일치 → ExternalPaste 분류
-//   4. 그 외 → AddNoteWithMeta로 일반 노트 누적
+//   1. PendingExternalPasteUserID 일치 → ExternalPaste 분류
+//   2. 그 외 → AddNoteWithMeta로 일반 노트 누적
+//
+// 세션 종료는 sendText 아닌 clickSessionEnd() helper로 button click 시뮬레이션.
 //
 // 단위 테스트로는 못 잡던 "state machine 전이 + 분기 우선순위"를 검증하는 것이 목적.
 // fakeDiscord 인터랙션 (button click)은 별도 headless 시나리오로 후속 추가.
@@ -85,24 +86,27 @@ func (b *scenarioBot) sendTextFrom(userID, username, content string) {
 	b.handleAuthored(userID, username, content)
 }
 
+// clickSessionEnd는 sticky의 [세션 종료] button click을 시뮬레이션한다 (D4 button-only 정책).
+// 실제 discord.go의 customIDSessionEnd case가 HandleSessionEnd를 호출하는 동작과 동일하게 모방.
+//
+// 단위 테스트가 button click을 직접 dispatch하지 못하므로, 본 helper는 "사용자가 sticky의 [세션 종료]
+// button을 눌렀다"는 정확한 의미만 시뮬레이션 — discordgo.InteractionCreate 객체는 만들지 않음.
+func (b *scenarioBot) clickSessionEnd() {
+	b.t.Helper()
+	HandleSessionEnd(b.t.Context(), b.msg, b.sess)
+}
+
 // handleAuthored는 handleSession 분기 우선순위를 fakeMessenger 경유로 시뮬레이션한다.
 // 실제 코드 흐름과 분기 순서를 동기화 — handleSession 또는 handleMeetingMessage 변경 시 이것도 갱신.
+//
+// D4 정책: 텍스트 escape 분기 없음 — 모든 종료/취소는 sticky button (clickSessionEnd helper).
 func (b *scenarioBot) handleAuthored(userID, username, content string) {
 	b.t.Helper()
-
-	// 1. Universal escape (어떤 state에서든 종료 명령은 HandleSessionEnd로)
-	if IsMeetingEndCommand(strings.TrimSpace(content)) && b.sess.Mode == ModeMeeting && b.sess.State != StateMeeting {
-		HandleSessionEnd(b.t.Context(), b.msg, b.sess)
-		return
-	}
-
-	// 2. await state 분기 — 실제 handleSession switch와 동일
 	switch b.sess.State {
 	case StateMeeting:
 		b.simulateMeetingMessage(userID, username, content)
 	case StateMeetingAwaitDirective:
-		// directive 입력 — 정확한 escape 처리는 universal에서 이미 분기됨
-		// 그 외엔 directive로 처리
+		// directive 입력 — finalize 흐름과 묶여있어 시나리오에서는 분기만 검증
 	case StateAgentAwaitInput:
 		// agent 입력 — handleAgentMessage 시뮬레이션은 LLM 호출 의존이라 시나리오에서 분기만 검증
 	// StateWeeklyAwaitDirective 폐기 — D2 정책
@@ -110,15 +114,9 @@ func (b *scenarioBot) handleAuthored(userID, username, content string) {
 }
 
 // simulateMeetingMessage는 handleMeetingMessage의 핵심 분기를 fake로 재현 (sticky 갱신/role fetch 제외).
-// 미팅 종료 명령 분기 + Source 분류 + per-user pending 게이트만 검증.
+// D4 정책: "미팅 종료" 텍스트 escape 분기 없음 — 일반 미팅 노트로만 누적. 종료는 clickSessionEnd로.
+// Source 분류 + per-user pending 게이트만 검증.
 func (b *scenarioBot) simulateMeetingMessage(userID, username, content string) {
-	if IsMeetingEndCommand(strings.TrimSpace(content)) {
-		b.sess.PendingExternalPasteUserID = ""
-		// StateMeeting에서 종료 명령 — handleMeetingEnd 흐름. 시나리오에선 즉시 HandleSessionEnd로 단순화.
-		HandleSessionEnd(b.t.Context(), b.msg, b.sess)
-		return
-	}
-
 	// per-user pending 게이트
 	var source db.NoteSource
 	if b.sess.PendingExternalPasteUserID != "" && b.sess.PendingExternalPasteUserID == userID {
@@ -207,6 +205,30 @@ func TestScenario_IsMeetingEndCommand_세션종료_미인식(t *testing.T) {
 	// legacy "미팅 종료"/"회의 종료"는 인식되나 호출처 없음 (D4 정책상 dead).
 	if !IsMeetingEndCommand("미팅 종료") {
 		t.Error("'미팅 종료' 인식 실패 (legacy 호환)")
+	}
+}
+
+// 핵심 시나리오 2: D4 button-only — sticky [세션 종료] button click만 실제 종료를 트리거한다.
+// 텍스트 "세션 종료"는 정확히 corpus에 누적되어야 하고, button click은 sessions map에서 제거.
+func TestScenario_ClickSessionEnd_세션_제거됨(t *testing.T) {
+	b := newScenarioBot(t)
+
+	// given: 미팅 진행 중 텍스트 누적
+	b.sendText("alice 발화 1")
+	b.sendText("alice 발화 2")
+	if len(b.sess.Notes) != 2 {
+		t.Fatalf("setup: note count = %d, want 2", len(b.sess.Notes))
+	}
+
+	// when: 사용자가 sticky의 [세션 종료] button click
+	b.clickSessionEnd()
+
+	// then: sessions map에서 제거됨
+	sessionsMu.RLock()
+	_, exists := sessions[b.sess.ThreadID]
+	sessionsMu.RUnlock()
+	if exists {
+		t.Error("clickSessionEnd 후에도 sessions map에 남음 — HandleSessionEnd 분기 문제")
 	}
 }
 

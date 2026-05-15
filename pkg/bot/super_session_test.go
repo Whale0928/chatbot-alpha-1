@@ -37,7 +37,11 @@ func TestSuperSessionStickyComponents_V4Layout_Row1Primary(t *testing.T) {
 		{customIDFinalizeSummarized, discordgo.SuccessButton, "회의록 정리"},
 	}
 	for i, want := range wantOrder {
-		btn := row1.Components[i].(discordgo.Button)
+		// type assertion ok-check — Button이 아니면 t.Fatalf로 명확한 원인 출력 (panic 방지).
+		btn, ok := row1.Components[i].(discordgo.Button)
+		if !ok {
+			t.Fatalf("row 1[%d]: expected discordgo.Button, got %T", i, row1.Components[i])
+		}
 		if btn.CustomID != want.id {
 			t.Errorf("row 1[%d] customID = %q, want %q", i, btn.CustomID, want.id)
 		}
@@ -72,7 +76,11 @@ func TestSuperSessionStickyComponents_V4Layout_Row2SecondaryAndDanger(t *testing
 		{customIDSessionEnd, discordgo.DangerButton, "세션 종료"},
 	}
 	for i, want := range wantOrder {
-		btn := row2.Components[i].(discordgo.Button)
+		// type assertion ok-check — Button이 아니면 t.Fatalf로 명확한 원인 출력 (panic 방지).
+		btn, ok := row2.Components[i].(discordgo.Button)
+		if !ok {
+			t.Fatalf("row 2[%d]: expected discordgo.Button, got %T", i, row2.Components[i])
+		}
 		if btn.CustomID != want.id {
 			t.Errorf("row 2[%d] customID = %q, want %q", i, btn.CustomID, want.id)
 		}

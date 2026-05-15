@@ -522,13 +522,13 @@
   <div class="step-num"><div class="n" style="background: var(--good); color: #102014;">3A</div><div class="line"></div></div>
   <div class="step-content">
     <div class="step-title">모듈별 bump 개별 선택 (4 row)</div>
-    <div class="step-trigger">봇 응답 — 4 모듈 각각 한 row · 사용자가 각 모듈에 대해 bump button 클릭. default = patch (사용자가 안 누르면 patch로 갑).</div>
+    <div class="step-trigger">봇 응답 — 4 모듈 각각 한 row · 사용자가 각 모듈에 대해 bump button 클릭. <strong>미선택 모듈은 release 대상에서 자동 제외</strong> (의도적 partial release 가능).</div>
     <div class="disco">
       <div class="disco-msg">
         <div class="disco-avatar bot">B</div>
         <div>
           <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
-          <div class="disco-body">전체 릴리즈 — 모듈별 bump를 선택해주세요. 선택 안 한 모듈은 <code>patch</code> 기본값. 다 정하면 [확인].</div>
+          <div class="disco-body">전체 릴리즈 — 모듈별 bump를 선택해주세요. <strong>미선택 모듈은 release 대상에서 자동 제외</strong> (의도적으로 일부만 release 가능). 다 정하면 [모두 진행].</div>
 
           <!-- 모듈 4개 row — 실제 레포 데이터 기반 -->
           <div style="margin-top: 8px; display: grid; gap: 6px;">
@@ -706,7 +706,7 @@
   &nbsp;&nbsp;&nbsp;&nbsp;2. <b>어드민 API</b> — <code>bottle-note-api-server</code> · 등록됨<br/>
   &nbsp;&nbsp;&nbsp;&nbsp;3. <b>프론트엔드</b> — <code>bottle-note-frontend</code> · <span style="color:var(--warn);">신규 등록 필요</span> (tag/branch/VERSION 모두 준비됨)<br/>
   &nbsp;&nbsp;&nbsp;&nbsp;4. <b>어드민 대시보드</b> — <code>admin-dashboard</code> · <span style="color:var(--danger);">신규 등록 + 첫 릴리즈 처리 필요</span> (tag 없음, VERSION만 있음 v1.4.1)<br/>
-  · bump UI: 모듈마다 row (모듈명+버전 + 3 bump button), default = patch<br/>
+  · bump UI: 모듈마다 row (모듈명 StringSelectMenu = major/minor/patch), <strong>미선택 모듈은 release 대상에서 자동 제외</strong> (의도적 partial release)<br/>
   · 진행: 4 goroutine 동시 (5단계 × 4 모듈 = 20 step, 약 30~60초)<br/>
   · progress 메시지: 단일 메시지에 4 모듈 상태 동시 표시<br/>
   · 부분 실패: 모듈별 독립 — 성공한 PR은 살림<br/>
