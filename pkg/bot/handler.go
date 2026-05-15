@@ -459,21 +459,11 @@ func superSessionStickyComponents() []discordgo.MessageComponent {
 
 // buildSuperSessionStickyMessageSend는 sticky payload를 생성한다.
 //
-// 본문: 헤더 + 7 button 설명 표 (SPEC 카드 형태). 매 갱신마다 같은 텍스트 — 사용자 학습 비용 절감.
+// 본문: 헤더 한 줄(super-session 상태 + 메모 수)만 노출. 7 button 설명 표는 button label 자체가 self-evident
+// 하므로 sticky를 매번 갱신할 때마다 길게 노출할 필요 없음 (사용자 피드백 — 화면 차지 줄임).
 // button만으로 모든 명령 가능 (D4 정책 — 텍스트 escape 폐기).
 func buildSuperSessionStickyMessageSend(noteCount int) *discordgo.MessageSend {
-	body := fmt.Sprintf(
-		"`super-session 진행 중` · 메모 **%d건**\n"+
-			"```\n"+
-			"[중간 요약]        지금까지 회의를 짧게 임시 정리\n"+
-			"[회의록 정리]      4 포맷 정리본 추출 (가장 자주)\n"+
-			"[GitHub 주간 분석] 레포 활동(이슈/커밋)을 회의 자료에 추가\n"+
-			"[릴리즈 PR 만들기] 모듈 → bump → PR 자동 생성\n"+
-			"[AI에게 질문]      자유 자연어 분석 요청\n"+
-			"[외부 문서 첨부]    다음 메시지를 외부 자료로 분류\n"+
-			"[세션 종료]        미팅 마무리\n"+
-			"```", noteCount,
-	)
+	body := fmt.Sprintf("`super-session 진행 중` · 메모 **%d건**", noteCount)
 	return &discordgo.MessageSend{
 		Content:    body,
 		Components: superSessionStickyComponents(),

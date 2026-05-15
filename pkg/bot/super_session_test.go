@@ -93,24 +93,28 @@ func TestSuperSessionStickyComponents_V4Layout_Row2SecondaryAndDanger(t *testing
 	}
 }
 
-func TestBuildSuperSessionStickyMessageSend_BodyContainsLabelTable(t *testing.T) {
+func TestBuildSuperSessionStickyMessageSend_BodyMinimal(t *testing.T) {
 	got := buildSuperSessionStickyMessageSend(13)
-	if !strings.Contains(got.Content, "13") {
-		t.Errorf("content에 노트 수 13 누락: %q", got.Content)
-	}
+	// 본문은 헤더 한 줄만 — 7 button 설명 표는 사용자 피드백으로 제거 (button label이 self-evident).
 	mustContain := []string{
 		"super-session 진행 중",
-		"[중간 요약]", "지금까지 회의",
-		"[회의록 정리]", "4 포맷 정리본",
-		"[GitHub 주간 분석]", "레포 활동",
-		"[릴리즈 PR 만들기]", "모듈",
-		"[AI에게 질문]",
-		"[외부 문서 첨부]",
-		"[세션 종료]",
+		"13", // 메모 수
 	}
 	for _, s := range mustContain {
 		if !strings.Contains(got.Content, s) {
 			t.Errorf("sticky 본문에 %q 누락:\n%s", s, got.Content)
+		}
+	}
+	// 설명 텍스트가 다시 들어오면 회귀 — 명시 거부.
+	mustNotContain := []string{
+		"지금까지 회의",
+		"4 포맷 정리본",
+		"레포 활동",
+		"미팅 마무리",
+	}
+	for _, s := range mustNotContain {
+		if strings.Contains(got.Content, s) {
+			t.Errorf("sticky 본문에 설명 텍스트 %q 잔존 — 헤더만 노출하기로 했음:\n%s", s, got.Content)
 		}
 	}
 	if len(got.Components) != 2 {
