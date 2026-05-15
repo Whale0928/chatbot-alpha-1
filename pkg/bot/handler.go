@@ -72,8 +72,10 @@ type MeetingSummarizer interface {
 	SummarizeInterim(ctx context.Context, notes []llm.Note, speakers []string, date time.Time) (*llm.InterimNoteResponse, error)
 
 	// Phase 2 — SummarizedContent 1회 추출 (정리본 토글의 LLM 호출 단일 진입점).
-	// 후속 4 포맷 렌더는 순수 함수 (LLM 재호출 X — 거시 디자인 결정 A).
 	ExtractContent(ctx context.Context, in summarize.ContentExtractionInput) (*llm.SummarizedContent, error)
+
+	// Phase A — SummarizedContent 기반 포맷별 LLM 재렌더.
+	RenderFormat(ctx context.Context, in summarize.FormatRenderInput) (string, error)
 }
 
 // finalizeMeeting은 "미팅 종료" 시 실행되는 핵심 로직.
@@ -288,10 +290,10 @@ const (
 // Phase 3+에서 legacy 4 button 폐기 검토.
 //
 // 클릭 동작:
-//   1. PrepareContentExtractionInput으로 corpus 분리
-//   2. summ.ExtractContent (LLM 1회)
-//   3. PersistSummarizedContent (DB)
-//   4. 4 포맷 토글 button이 첨부된 정리본 메시지 전송 (chunk 3c)
+//  1. PrepareContentExtractionInput으로 corpus 분리
+//  2. summ.ExtractContent (LLM 1회)
+//  3. PersistSummarizedContent (DB)
+//  4. 4 포맷 토글 button이 첨부된 정리본 메시지 전송 (chunk 3c)
 const customIDFinalizeSummarized = "finalize_summarized"
 
 // customIDFormatToggle* — Phase 2 정리본 메시지의 포맷 토글 button (chunk 3c).

@@ -2,7 +2,9 @@ package bot
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -365,9 +367,9 @@ func formatToDBKind(f llm.NoteFormat) db.FormatKind {
 // 흐름:
 //  1. 새 포맷 추출 (customID에서)
 //  2. DB에서 sess의 latest SummarizedContent 조회 — LLM 재호출 X (거시 결정 A)
-//  3. 새 포맷으로 렌더 (순수 함수)
-//  4. 메시지 edit + 토글 button row 갱신 (active 강조)
-//  5. FinalizeRun persist (이력 audit)
+//  3. finalize_runs cache 조회
+//  4. cache miss면 SummarizedContent를 새 포맷으로 LLM 재렌더
+//  5. 메시지 edit + 토글 button row 갱신 (active 강조)
 //
 // 호출 계약: 호출자(discord.go interactionCreate)가 이미 InteractionResponseDeferredMessageUpdate로
 // ACK를 완료한 상태. 따라서 사용자 피드백은 InteractionResponse* 대신 FollowupMessageCreate로
@@ -420,23 +422,65 @@ func HandleFormatToggle(
 		return
 	}
 
-	var content llm.SummarizedContent
-	if err := json.Unmarshal(scRow.Content, &content); err != nil {
-		log.Printf("[미팅/format_toggle] ERR unmarshal sc=%s: %v", scRow.ID, err)
-		sendFollowup("정리본 파싱에 실패했습니다.")
+	formatKind := formatToDBKind(format)
+	existing, err := dbConn.GetFinalizeRunByFormat(ctx, scRow.ID, formatKind)
+	var rendered string
+	switch {
+	case err == nil && existing != nil:
+		rendered = existing.OutputMD
+		log.Printf("[meeting/format_toggle] cache_hit thread=%s format=%s sc=%s",
+			sess.ThreadID, format, scRow.ID)
+	case errors.Is(err, sql.ErrNoRows):
+		log.Printf("[meeting/format_toggle] cache_miss thread=%s format=%s sc=%s — LLM call",
+			sess.ThreadID, format, scRow.ID)
+		if summarizer == nil {
+			log.Printf("[미팅/format_toggle] ERR summarizer nil thread=%s format=%s sc=%s",
+				sess.ThreadID, format, scRow.ID)
+			sendFollowup("포맷 렌더링을 실행할 수 없습니다. 봇 설정을 확인해주세요.")
+			return
+		}
+
+		var content llm.SummarizedContent
+		if err := json.Unmarshal(scRow.Content, &content); err != nil {
+			log.Printf("[미팅/format_toggle] ERR unmarshal sc=%s: %v", scRow.ID, err)
+			sendFollowup("정리본 파싱에 실패했습니다.")
+			return
+		}
+
+		// 렌더 입력 — speakers/roles는 in-memory 세션 또는 DB에서. Phase 2에선 in-memory 우선.
+		speakers := sess.SortedHumanSpeakers()
+		sess.NotesMu.Lock()
+		rolesCopy := make(map[string][]string, len(sess.RolesSnapshot))
+		for k, v := range sess.RolesSnapshot {
+			rolesCopy[k] = v
+		}
+		sess.NotesMu.Unlock()
+
+		start := time.Now()
+		rendered, err = summarizer.RenderFormat(ctx, summarize.FormatRenderInput{
+			Content:      &content,
+			Format:       format,
+			Date:         scRow.ExtractedAt,
+			Speakers:     speakers,
+			SpeakerRoles: rolesCopy,
+			Directive:    "",
+		})
+		elapsed := time.Since(start)
+		if err != nil {
+			log.Printf("[meeting/format_toggle] ERR RenderFormat thread=%s format=%s sc=%s elapsed=%s err=%v",
+				sess.ThreadID, format, scRow.ID, elapsed, err)
+			sendFollowup("포맷 렌더링 중 오류가 발생했습니다. 다시 토글 button을 눌러주세요.")
+			return
+		}
+		log.Printf("[meeting/format_toggle] llm_render_ok thread=%s format=%s sc=%s elapsed=%s rendered_bytes=%d",
+			sess.ThreadID, format, scRow.ID, elapsed, len(rendered))
+		PersistFinalizeRun(ctx, scRow.ID, formatKind, "", rendered)
+	default:
+		log.Printf("[미팅/format_toggle] ERR GetFinalizeRunByFormat thread=%s sc=%s format=%s: %v",
+			sess.ThreadID, scRow.ID, format, err)
+		sendFollowup("정리본 캐시 조회에 실패했습니다. 다시 토글 button을 눌러주세요.")
 		return
 	}
-
-	// 렌더 입력 — speakers/roles는 in-memory 세션 또는 DB에서. Phase 2에선 in-memory 우선.
-	speakers := sess.SortedHumanSpeakers()
-	sess.NotesMu.Lock()
-	rolesCopy := make(map[string][]string, len(sess.RolesSnapshot))
-	for k, v := range sess.RolesSnapshot {
-		rolesCopy[k] = v
-	}
-	sess.NotesMu.Unlock()
-
-	rendered := renderSummarizedByFormat(&content, format, speakers, rolesCopy, scRow.ExtractedAt)
 
 	// 메시지 edit — interaction의 원본 메시지를 embed로 갱신 (FinalizeSummarized 초기 send와 동일 형식).
 	// content 필드 비우고 embeds로 교체 — Discord는 둘 중 하나만 있어도 OK.
@@ -456,9 +500,6 @@ func HandleFormatToggle(
 		sendFollowup("정리본 메시지 갱신에 실패했습니다. 다시 토글 button을 눌러주세요.")
 		return
 	}
-
-	// FinalizeRun persist (이력) — 메시지 edit 성공한 경우에만 (사용자가 실제로 본 결과만 audit).
-	PersistFinalizeRun(ctx, scRow.ID, formatToDBKind(format), "", rendered)
 
 	log.Printf("[미팅/format_toggle] 완료 thread=%s sc=%s format=%s rendered_bytes=%d",
 		sess.ThreadID, scRow.ID, format, len(rendered))

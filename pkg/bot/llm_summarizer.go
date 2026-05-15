@@ -45,3 +45,8 @@ func (a llmSummarizer) SummarizeInterim(ctx context.Context, notes []llm.Note, s
 func (a llmSummarizer) ExtractContent(ctx context.Context, in summarize.ContentExtractionInput) (*llm.SummarizedContent, error) {
 	return summarize.ExtractContent(ctx, a.c, in)
 }
+
+// RenderFormat는 Phase A 포맷 토글의 LLM 재렌더 어댑터 메서드.
+func (a llmSummarizer) RenderFormat(ctx context.Context, in summarize.FormatRenderInput) (string, error) {
+	return summarize.RenderFormat(ctx, a.c, in)
+}
