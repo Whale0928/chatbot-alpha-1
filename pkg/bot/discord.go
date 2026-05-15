@@ -109,11 +109,21 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	sessionsMu.RUnlock()
 
 	if !exists {
+		logGuard("discord", "session_expired", "button click — 세션 만료",
+			lf("custom_id", data.CustomID), lf("channel", channelID),
+			lf("uid", userIDFromInteraction(i)), lf("user", interactionCallerUsername(i)))
 		respondInteraction(s, i, "세션이 만료되었습니다. 다시 시작해주세요.")
 		return
 	}
 
 	sess.UpdatedAt = time.Now()
+
+	// 모든 button click 진입 로그 — kubectl logs grep '\[discord/click\]' 으로 사용자 클릭 흐름 재구성.
+	// custom_id + state + mode를 박제해 race condition 추적 가능 (같은 thread 동시 클릭 시 순서 확인).
+	logEvent("discord", "click", "",
+		lf("thread", sess.ThreadID), lf("custom_id", data.CustomID),
+		lf("uid", userIDFromInteraction(i)), lf("user", interactionCallerUsername(i)),
+		lf("mode", sess.Mode.String()), lf("state", sess.State.String()))
 
 	// === Phase 3 chunk 3C — Pending* 자동 취소 (per-user 게이트) ===
 	// pending 취소는 본인이 다른 button을 누른 경우만 — 다른 참석자가 sticky를 만져도 A의 pending이
@@ -121,6 +131,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	clickerUID := userIDFromInteraction(i)
 	if data.CustomID != customIDExternalAttach && sess.PendingExternalPasteUserID != "" &&
 		sess.PendingExternalPasteUserID == clickerUID {
+		logEvent("meeting", "pending_clear", "ExternalPaste pending 자동 취소 (다른 button click)",
+			lf("thread", sess.ThreadID), lf("uid", clickerUID), lf("triggered_by", data.CustomID))
 		sess.PendingExternalPasteUserID = ""
 	}
 	if data.CustomID != customIDSubActionAgent && sess.PendingAgentUserID != "" &&
@@ -128,8 +140,12 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		// agent pending 취소 시 super-session에서는 State도 Meeting으로 복귀 — StateAgentAwaitInput
 		// 잔존 시 다음 미팅 발화가 agent로 라우팅되는 race 방어 (codex 4차 리뷰 P2).
 		if sess.Mode == ModeMeeting && sess.State == StateAgentAwaitInput {
+			logState("agent", "agent pending 취소로 state 복귀", "agent_await_input", "meeting",
+				lf("thread", sess.ThreadID), lf("uid", clickerUID))
 			sess.State = StateMeeting
 		}
+		logEvent("agent", "pending_clear", "Agent pending 자동 취소 (다른 button click)",
+			lf("thread", sess.ThreadID), lf("uid", clickerUID), lf("triggered_by", data.CustomID))
 		sess.PendingAgentUserID = ""
 	}
 
@@ -160,26 +176,24 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleReleaseBump(s, i, sess, strings.TrimPrefix(data.CustomID, customIDReleaseBumpPrefix))
 		return
 	}
+	// B-3 batch release: 모듈별 StringSelectMenu prefix 매칭.
+	if strings.HasPrefix(data.CustomID, customIDBatchReleaseSelectPrefix) {
+		handleBatchReleaseSelect(s, i, sess, strings.TrimPrefix(data.CustomID, customIDBatchReleaseSelectPrefix))
+		return
+	}
 
-	// 주간 follow-up 버튼들. weekly.go의 핸들러에 위임.
+	// 주간 첫 분석 흐름의 라우팅. weekly.go의 핸들러에 위임.
+	//
+	// D1/D2 폐기 라우팅 (UX 재설계 2026-05):
+	//   - customIDWeeklyDirectiveBtn  (D2)
+	//   - customIDWeeklyPeriodPromptBtn / customIDWeeklyRetryBtn / customIDWeeklyToMeetingBtn (D1 follow-up)
+	//   - customIDHomeBtn (D1 — handleHome 자체 폐기)
 	switch data.CustomID {
-	case customIDWeeklyDirectiveBtn:
-		handleWeeklyDirective(s, i, sess)
-		return
-	case customIDWeeklyPeriodPromptBtn:
-		handleWeeklyPeriodPrompt(s, i, sess)
-		return
 	case customIDWeeklyPeriodSelect:
 		handleWeeklyPeriodSelect(s, i, sess)
 		return
 	case customIDWeeklyPeriodConfirm:
 		handleWeeklyPeriodConfirm(s, i, sess)
-		return
-	case customIDWeeklyRetryBtn:
-		handleWeeklyRetry(s, i, sess)
-		return
-	case customIDWeeklyToMeetingBtn:
-		handleWeeklyToMeeting(s, i, sess)
 		return
 	case customIDWeeklyCloseStartBtn:
 		handleWeeklyCloseStart(s, i, sess)
@@ -187,27 +201,13 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	case customIDWeeklyCloseConfirmBtn:
 		handleWeeklyCloseConfirm(s, i, sess)
 		return
-	case customIDHomeBtn:
-		handleHome(s, i, sess)
-		return
 	}
 
+	// D1 폐기 case (UX 재설계 2026-05): home menu의 5 button — openThread/enterSlashMode가 super-session
+	// 즉시 시작으로 통일됐기 때문에 더 이상 노출 X.
+	//   - "mode_meeting" / "mode_weekly" / "mode_status" / customIDAgentBtn (legacy entry)
+	// 보존: customIDReleaseEntry는 release.go의 [← 라인 다시] button 진입점으로 super-session 안에서 사용 중.
 	switch data.CustomID {
-	// 기능 선택
-	case "mode_meeting":
-		sess.Mode = ModeMeeting
-		sess.State = StateMeeting
-		sess.Notes = nil
-		sess.Speakers = nil
-		sess.NotesAtLastSticky = 0
-		sess.StickyMessageID = ""
-		sess.Directive = ""
-		log.Printf("[미팅/start] 미팅 모드 진입 thread=%s user=%s", sess.ThreadID, sess.UserID)
-		respondInteraction(s, i, "미팅을 시작합니다. 자유롭게 메시지를 입력하세요. 하단 sticky 버튼으로 [중간 요약]/[주간 추가]/[릴리즈 추가]/[에이전트]/[노트 정리]를 같은 스레드에서 실행할 수 있고, [세션 종료]로 마무리할 수 있습니다. (\"미팅 종료\" 입력도 가능)")
-		// 초기 sticky 컨트롤 메시지 전송 - Phase 3 super-session 6 button (Row1: [중간 요약]
-		// [주간 추가][릴리즈 추가][에이전트][노트 정리] / Row2: [세션 종료])이 항상 보이도록.
-		sendSticky(s, sess)
-
 	// interim/sticky 메시지 하단 "미팅 종료" 버튼 → 4 포맷 선택 prompt
 	case customIDMeetingEndBtn:
 		log.Printf("[미팅/end] 종료 버튼 클릭 thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
@@ -293,33 +293,55 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// stale 처리 (codex 7차): release 완료(PRNumber>0)된 ctx는 새 release를 막지 않도록 reset.
 	// 진행 중(PRNumber=0)인 ctx만 reject — 같은 미팅에서 release 여러 번 가능.
 	case customIDSubActionRelease:
-		log.Printf("[미팅/subaction_release] thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
-		if sess.ReleaseCtx != nil && sess.ReleaseCtx.PRNumber == 0 {
-			respondInteraction(s, i, "현재 진행 중인 릴리즈가 있습니다. 완료/취소 후 다시 시작해주세요. (race 방어 — 동시에 여러 release를 같은 스레드에서 진행 X)")
+		// codex review P3 fix: rc.InProgress 사용 — abandoned ReleaseCtx (bump 선택 후 [확인] 안 누름)는
+		// 더 이상 사용자를 가두지 않고 새 release 진입 허용. 기존 PRNumber==0 가드는 abandoned/in-flight 구분 X.
+		if sess.ReleaseCtx != nil && sess.ReleaseCtx.InProgress {
+			logGuard("release", "single_in_progress", "단일 release 진행 중 — 새 진입 reject",
+				lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+				lf("module", sess.ReleaseCtx.Module.Key))
+			respondInteraction(s, i, "현재 진행 중인 릴리즈가 있습니다. 완료 후 다시 시작해주세요. (race 방어 — 동시에 여러 release를 같은 스레드에서 진행 X)")
 			return
 		}
-		// 완료된 stale ReleaseCtx는 handleReleaseEntry가 새로 덮어쓸 수 있도록 reset.
+		// B-3 추가 가드: batch release(InProgress=true)도 단일 release 진입 reject.
+		// Selections만 박제된 미진행 batch ctx는 사용자가 마음 바뀐 케이스 — 덮어쓰기 허용.
+		if sess.BatchReleaseCtx != nil && sess.BatchReleaseCtx.InProgress {
+			logGuard("release", "batch_in_progress", "batch release 진행 중 — 단일 release 진입 reject",
+				lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+				lf("selected", sess.BatchReleaseCtx.SelectedCount()))
+			respondInteraction(s, i, "현재 batch release가 진행 중입니다. 완료 후 다시 시작해주세요.")
+			return
+		}
+		// 진행 중이 아닌 ReleaseCtx (abandoned 또는 완료) / 미진행 batch ctx 모두 reset.
 		sess.ReleaseCtx = nil
+		sess.BatchReleaseCtx = nil
 		handleReleaseEntry(s, i, sess)
 
 	// === Phase 3 chunk 3B-2c — [에이전트] in-thread 통합 ===
 	// agent 모드 진입 (사용자 자유 자연어 지시 입력 대기). 메시지 입력 시 runAgentInstruction 호출 →
 	// SubAction(Agent) lifecycle + 결과 corpus 누적.
 	case customIDSubActionAgent:
-		log.Printf("[미팅/subaction_agent] thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
-		// handleAgent와 동일 가드 — GITHUB_TOKEN 미설정 시 fetchAgentContext가 nil deref panic 위험.
+		// agent 가드 — GITHUB_TOKEN 미설정 시 fetchAgentContext가 nil deref panic 위험.
 		if githubClient == nil {
+			logGuard("agent", "github_unconfigured", "GITHUB_TOKEN 미설정 — agent 진입 reject",
+				lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)))
 			respondInteraction(s, i, "GITHUB_TOKEN이 설정되어 있지 않아 에이전트 기능을 사용할 수 없습니다.")
 			return
 		}
 		// LLM 가드 — GPT_API_KEY 누락 시 summarize.Agent에서 c.API() nil deref panic.
 		if llmClient == nil {
+			logGuard("agent", "llm_unconfigured", "LLM client 미초기화 — agent 진입 reject",
+				lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)))
 			respondInteraction(s, i, "LLM 클라이언트가 초기화되지 않아 에이전트 기능을 사용할 수 없습니다.")
 			return
 		}
 		// per-user pending — 다중 참석자 회의에서 다른 사용자의 일반 발화를 agent 지시로 잘못 처리 방지.
 		// 발화 시점에 m.Author.ID와 비교해 일치하는 사람의 다음 1건 메시지만 agent 입력으로 소비.
-		sess.PendingAgentUserID = userIDFromInteraction(i)
+		clickerUID := userIDFromInteraction(i)
+		sess.PendingAgentUserID = clickerUID
+		logState("agent", "[AI에게 질문] click — agent 입력 대기 진입", sess.State.String(), "agent_await_input",
+			lf("thread", sess.ThreadID), lf("uid", clickerUID), lf("user", interactionCallerUsername(i)))
+		logEvent("agent", "pending_set", "agent 입력 owner 박제 (per-user gate)",
+			lf("thread", sess.ThreadID), lf("uid", clickerUID))
 		sess.State = StateAgentAwaitInput
 		respondInteraction(s, i, "에이전트 모드: 자유 자연어 지시를 입력하세요 (예: \"인프라 관련 열려있는 이슈 가져와\"). 결과는 이 스레드의 corpus에 누적됩니다. (button을 누른 본인의 다음 메시지만 지시로 처리)")
 
@@ -329,7 +351,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	case customIDExternalAttach:
 		uid := userIDFromInteraction(i)
 		sess.PendingExternalPasteUserID = uid
-		log.Printf("[미팅/external_attach] 활성화 thread=%s by=%s uid=%s", sess.ThreadID, interactionCallerUsername(i), uid)
+		logEvent("meeting", "pending_set", "ExternalPaste 활성화 (다음 발화 1건 = 외부 자료)",
+			lf("thread", sess.ThreadID), lf("uid", uid), lf("user", interactionCallerUsername(i)))
 		respondInteraction(s, i, "본인이 보내는 다음 메시지 1건을 외부 자료로 분류합니다. 회의록·외부 문서 등을 그대로 paste 해주세요. (취소: 다른 button 클릭 또는 발화 1건 후 자동 해제)")
 
 	// === Phase 3 chunk 3D — 명시 [세션 종료] button ===
@@ -408,12 +431,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		emitInterim(ctx, s, summarizer, sess, time.Now())
-	case "mode_weekly":
-		respondInteraction(s, i, "주간 정리할 레포를 선택해주세요.")
-		sendWeeklyRepoButtons(s, channelID)
-	case customIDAgentBtn:
-		handleAgent(s, i, sess)
 	case customIDReleaseEntry:
+		// release.go의 [← 라인 다시] button 진입점 — super-session 안에서 release 흐름 재시작.
 		handleReleaseEntry(s, i, sess)
 	case customIDReleaseConfirm:
 		handleReleaseConfirm(s, i, sess)
@@ -423,9 +442,10 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleReleaseBackModule(s, i, sess)
 	case customIDReleasePollStop:
 		handleReleasePollStop(s, i, sess)
-	case "mode_status":
-		respondInteractionWithStatus(s, i)
-		// 세션은 정리하지 않음 — 사용자가 [처음 메뉴]로 다른 작업 계속 가능.
+	case customIDBatchReleaseStart:
+		// B-3 batch release [모두 진행] button — selection 0건 검증 + InProgress 박제 후 (B-4 미구현시)
+		// placeholder 안내. B-4 구현 시 실제 4 goroutine 병렬 발사를 호출하도록 교체.
+		handleBatchReleaseStart(s, i, sess)
 
 	default:
 		respondInteraction(s, i, "알 수 없는 동작입니다.")
@@ -462,6 +482,11 @@ func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate) {
 // 스레드/세션 생성 + 기능 선택
 // =====================================================================
 
+// openThread는 mention 한 번이면 super-session(ModeMeeting)을 즉시 시작한다.
+//
+// D1 정책 (UX 재설계 2026-05): "무엇을 도와드릴까요?" 5 button 메뉴 폐기 — 모든 진입은 super-session.
+// 사용자는 sticky button(중간 요약/회의록 정리/GitHub 주간 분석/릴리즈 PR 만들기/AI에게 질문/외부 문서 첨부/
+// 세션 종료)으로 모든 작업을 in-thread 수행한다.
 func openThread(s *discordgo.Session, m *discordgo.MessageCreate, content string) {
 	threadName := "봇 세션"
 	if content != "" {
@@ -481,8 +506,8 @@ func openThread(s *discordgo.Session, m *discordgo.MessageCreate, content string
 
 	now := time.Now()
 	sess := &Session{
-		Mode:      ModeNormal,
-		State:     StateSelectMode,
+		Mode:      ModeMeeting, // D1: 즉시 super-session
+		State:     StateMeeting,
 		ThreadID:  thread.ID,
 		UserID:    m.Author.ID,
 		GuildID:   m.GuildID,
@@ -496,20 +521,12 @@ func openThread(s *discordgo.Session, m *discordgo.MessageCreate, content string
 	// DB 영속화 (best-effort) — 실패해도 in-memory로 진행.
 	persistSessionStart(context.Background(), sess)
 
-	s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
-		Content: "무엇을 도와드릴까요?",
-		Components: []discordgo.MessageComponent{
-			discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{Label: "미팅", Style: discordgo.PrimaryButton, CustomID: "mode_meeting"},
-					discordgo.Button{Label: "주간 정리", Style: discordgo.PrimaryButton, CustomID: "mode_weekly"},
-					discordgo.Button{Label: "에이전트", Style: discordgo.SuccessButton, CustomID: customIDAgentBtn},
-					discordgo.Button{Label: "릴리즈", Style: discordgo.DangerButton, CustomID: customIDReleaseEntry},
-					discordgo.Button{Label: "상태 조회", Style: discordgo.SecondaryButton, CustomID: "mode_status"},
-				},
-			},
-		},
-	})
+	log.Printf("[미팅/start] super-session 즉시 진입 thread=%s user=%s (mention 진입)", sess.ThreadID, sess.UserID)
+	s.ChannelMessageSend(thread.ID,
+		"super-session을 시작합니다. 메시지를 자유롭게 입력하세요. "+
+			"하단 sticky button으로 [중간 요약]/[회의록 정리]/[GitHub 주간 분석]/[릴리즈 PR 만들기]/"+
+			"[AI에게 질문]/[외부 문서 첨부]/[세션 종료]를 실행할 수 있습니다.")
+	sendSticky(s, sess)
 }
 
 // =====================================================================
@@ -517,6 +534,8 @@ func openThread(s *discordgo.Session, m *discordgo.MessageCreate, content string
 // =====================================================================
 
 func handleSession(s *discordgo.Session, m *discordgo.MessageCreate, sess *Session) {
+	// D4 button-only 정책: 모든 명령은 sticky button만. universal escape 가드 폐기.
+	// 사용자가 "세션 종료" 텍스트 입력해도 일반 미팅 노트로 처리. 종료는 [세션 종료] button만.
 	switch sess.State {
 	case StateSelectMode:
 		handleSelectMode(s, m, sess)
@@ -524,8 +543,7 @@ func handleSession(s *discordgo.Session, m *discordgo.MessageCreate, sess *Sessi
 		handleMeetingMessage(s, m, sess)
 	case StateMeetingAwaitDirective:
 		handleMeetingDirective(s, m, sess)
-	case StateWeeklyAwaitDirective:
-		handleWeeklyAwaitDirectiveMessage(s, m, sess)
+	// StateWeeklyAwaitDirective case 폐기 — D2 정책 (handleWeeklyAwaitDirectiveMessage 제거됨)
 	case StateAgentAwaitInput:
 		// === Phase 3 chunk 3C — Agent per-user 게이트 (super-session safe) ===
 		// 정책:
@@ -537,6 +555,9 @@ func handleSession(s *discordgo.Session, m *discordgo.MessageCreate, sess *Sessi
 		// 도착하는 다른 발화가 StateAgentAwaitInput 상태에서 agent로 잘못 라우팅되는 것 방지.
 		if sess.PendingAgentUserID != "" && sess.PendingAgentUserID != m.Author.ID {
 			if sess.Mode == ModeMeeting {
+				logEvent("agent", "race_deflected", "agent 입력 대기 중 다른 사용자 발화 → 미팅 노트로 우회",
+					lf("thread", sess.ThreadID), lf("speaker_uid", m.Author.ID),
+					lf("pending_owner_uid", sess.PendingAgentUserID))
 				handleMeetingMessage(s, m, sess)
 				return
 			}
@@ -545,35 +566,34 @@ func handleSession(s *discordgo.Session, m *discordgo.MessageCreate, sess *Sessi
 		// 본인 발화 또는 legacy — agent 지시로 소비.
 		// super-session: long-running agent 호출 동안 다른 발화 race 차단을 위해 미리 StateMeeting 복귀.
 		if sess.Mode == ModeMeeting {
+			logState("agent", "agent 입력 소비 직전 — long-running 보호 위해 state 미리 복귀",
+				"agent_await_input", "meeting",
+				lf("thread", sess.ThreadID), lf("uid", m.Author.ID))
 			sess.State = StateMeeting
 		}
+		logEvent("agent", "pending_consume", "agent 입력 소비 (본인 발화 1건)",
+			lf("thread", sess.ThreadID), lf("uid", m.Author.ID), lf("user", m.Author.Username))
 		sess.PendingAgentUserID = ""
 		handleAgentMessage(s, m, sess)
 	}
 }
 
-// handleSelectMode: 텍스트 입력 폴백 (버튼 못 누른 경우)
+// handleSelectMode는 D1 정책 폐기 후 정상 흐름에서 도달 불가능한 fallback.
+//
+// openThread/enterSlashMode가 즉시 super-session(StateMeeting)으로 진입하므로 신규 세션은
+// StateSelectMode를 거치지 않는다. 다만 finalize 성공 후 sess.State = StateSelectMode로 reset되는
+// 경로가 남아있어 (Phase 3+에서 정리 예정), 그 경우 사용자 발화를 그대로 미팅 노트로 처리해
+// corpus가 끊기지 않도록 한다 — D4 button-only 정책에 맞춰 텍스트 1/2/3/4 분기는 폐기.
 func handleSelectMode(s *discordgo.Session, m *discordgo.MessageCreate, sess *Session) {
-	content := strings.TrimSpace(m.Content)
 	sess.UpdatedAt = time.Now()
-
-	switch content {
-	case "1":
-		sess.Mode = ModeMeeting
-		sess.State = StateMeeting
-		sess.Notes = nil
-		sess.Speakers = nil
-		s.ChannelMessageSend(m.ChannelID, "미팅을 시작합니다. \"미팅 종료\"로 마무리하세요.")
-	case "2":
-		sendWeeklyRepoButtons(s, m.ChannelID)
-	case "3":
-		sess.State = StateAgentAwaitInput
-		s.ChannelMessageSend(m.ChannelID, "에이전트 모드: 자유롭게 지시를 입력해주세요. (예: 워크스페이스에서 인프라 관련 열려있는 이슈들 가져와)")
-	case "4":
-		s.ChannelMessageSend(m.ChannelID, "상태 조회 - 버튼을 눌러주세요.")
-	default:
-		s.ChannelMessageSend(m.ChannelID, "버튼을 선택하거나 1~4를 입력해주세요.")
+	// 사용자가 sticky button을 누르지 않고 텍스트만 보냈다 — D1/D4 정책상 정상 흐름이 아니지만
+	// 발화를 잃지 않도록 ModeMeeting/StateMeeting 복원 후 일반 미팅 노트로 처리.
+	sess.Mode = ModeMeeting
+	sess.State = StateMeeting
+	if sess.StickyMessageID == "" {
+		sendSticky(s, sess)
 	}
+	handleMeetingMessage(s, m, sess)
 }
 
 // =====================================================================
@@ -584,13 +604,8 @@ func handleMeetingMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess
 	content := strings.TrimSpace(m.Content)
 	sess.UpdatedAt = time.Now()
 
-	if IsMeetingEndCommand(content) {
-		// "미팅 종료" command는 paste flag 소비 안 하므로 명시 clear (codex 6차 P2).
-		// 안 하면 finalize 후 같은 스레드 재사용 케이스에서 다음 일반 발화가 잘못 ExternalPaste로 분류.
-		sess.PendingExternalPasteUserID = ""
-		handleMeetingEnd(s, m, sess)
-		return
-	}
+	// D4 button-only — IsMeetingEndCommand 분기 폐기. "미팅 종료" 텍스트는 일반 미팅 노트로 누적.
+	// 종료는 sticky [세션 종료] button만 (HandleSessionEnd 경유).
 
 	// === Phase 1 — Source 자동 분류 + role snapshot + DB persist ===
 	// 거시 디자인 결정 F(자동) + 결정 6(Source 라벨로 환각 방어).
@@ -601,8 +616,9 @@ func handleMeetingMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess
 	if sess.PendingExternalPasteUserID != "" && sess.PendingExternalPasteUserID == m.Author.ID {
 		source = db.SourceExternalPaste
 		sess.PendingExternalPasteUserID = ""
-		log.Printf("[미팅/external_attach] 명시 분류 적용 thread=%s by=%s runes=%d",
-			sess.ThreadID, m.Author.Username, len([]rune(content)))
+		logEvent("meeting", "pending_consume", "ExternalPaste 명시 분류 적용 (button-set 발화 1건)",
+			lf("thread", sess.ThreadID), lf("uid", m.Author.ID), lf("user", m.Author.Username),
+			lf("runes", len([]rune(content))))
 	} else {
 		source = classifyMessageSource(content)
 	}
@@ -738,19 +754,7 @@ func labelForFormat(f llm.NoteFormat) string {
 	}
 }
 
-func respondInteractionWithStatus(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	respondInteractionWithRow(s, i, `**[bottle-note 현황]** (목킹)
-
-Open 이슈: 42건
-- bug: 9건 / feature: 30건 / fix: 6건
-- 담당자 없음: 42건
-- 라벨 누락: 19건
-
-최근 활동: 2026-04-09 #223 생성
-
-지연 경고:
-- #148 어드민 리뷰 발행 - 4개월 경과, 담당자 없음`,
-		discordgo.Button{Label: "처음 메뉴", Style: discordgo.SecondaryButton, CustomID: customIDHomeBtn},
-	)
-}
+// respondInteractionWithStatus 폐기 — D1 정책 (UX 재설계 2026-05).
+// "mode_status" 라우팅과 home menu의 [상태 조회] button이 사라져서 진입점 없음.
+// 향후 sticky에 별도 [상태 조회] button을 추가하려면 이 함수를 부활시킬 수 있음.
 

@@ -38,20 +38,24 @@ const weeklyGitHubTimeout = 30 * time.Second
 //     → 결과 메시지에 follow-up 5 + 닫기(closeable>0일 때) 첨부
 
 // 버튼 customID 상수.
+//
+// D1/D2 정책 폐기 customID:
+//   - customIDWeeklyDirectiveBtn (weekly_directive)   — D2 weekly directive 흐름 제거
+//   - customIDWeeklyPeriodPromptBtn (weekly_period_prompt) — D1 follow-up [기간 변경] 폐기
+//   - customIDWeeklyRetryBtn (weekly_retry)            — D1 follow-up [다시 분석] 폐기
+//   - customIDWeeklyToMeetingBtn (weekly_to_meeting)   — D1 follow-up [미팅 시작] 폐기
+//   - customIDHomeBtn (mode_home)                      — D1 [처음 메뉴] 폐기 (super-session sticky가 항상 표시)
+//
+// 첫 분석 흐름의 prompt(weekly_period_select/confirm/modal)는 보존 — handleWeeklyScopeSelect 진입점.
 const (
-	customIDWeeklyRepoPrefix      = "weekly_repo:"  // 레포 클릭 — owner/name
-	customIDWeeklyScopePrefix     = "weekly_scope:" // scope 클릭 — issues/commits/both
-	customIDWeeklyDirectiveBtn    = "weekly_directive"
-	customIDWeeklyPeriodPromptBtn = "weekly_period_prompt"     // [기간 변경] 클릭 — 드롭다운 + [확인] sub-prompt
+	customIDWeeklyRepoPrefix      = "weekly_repo:"             // 레포 클릭 — owner/name
+	customIDWeeklyScopePrefix     = "weekly_scope:"            // scope 클릭 — issues/commits/both
 	customIDWeeklyPeriodSelect    = "weekly_period_select"     // StringSelect — 일자 옵션 선택
 	customIDWeeklyPeriodConfirm   = "weekly_period_confirm"    // [확인] — 선택된 일자로 분석 실행
 	customIDWeeklyPeriodModal     = "weekly_period_modal"      // 직접 입력 modal submit custom_id
 	customIDWeeklyPeriodModalDate = "weekly_period_modal_date" // modal text input field id
-	customIDWeeklyRetryBtn        = "weekly_retry"
-	customIDWeeklyToMeetingBtn    = "weekly_to_meeting"
-	customIDWeeklyCloseStartBtn   = "weekly_close_start"   // [닫아도 될 이슈 N건 닫기] — 확인 prompt 노출
-	customIDWeeklyCloseConfirmBtn = "weekly_close_confirm" // 확인 후 실제 close API 호출
-	customIDHomeBtn               = "mode_home"
+	customIDWeeklyCloseStartBtn   = "weekly_close_start"       // [닫아도 될 이슈 N건 닫기] — 확인 prompt 노출
+	customIDWeeklyCloseConfirmBtn = "weekly_close_confirm"     // 확인 후 실제 close API 호출
 )
 
 // 드롭다운 옵션 value. weeklyPeriodValueCustom은 "직접 입력" — modal 발사로 분기.
@@ -182,14 +186,14 @@ func scopeAckLabel(scope llm.WeeklyScope) string {
 	}
 }
 
-// weeklyScopeComponents는 레포 선택 직후 노출되는 [이슈] [커밋(2주)] [전체] 버튼 행.
+// weeklyScopeComponents는 레포 선택 직후 노출되는 [이슈] [커밋] [전체] 버튼 행.
+// D1 정책: [처음 메뉴] button 폐기 — super-session sticky가 항상 노출됨.
 func weeklyScopeComponents() []discordgo.MessageComponent {
 	return []discordgo.MessageComponent{
 		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{Label: "이슈", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyScopePrefix + "issues"},
 			discordgo.Button{Label: "커밋", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyScopePrefix + "commits"},
 			discordgo.Button{Label: "전체", Style: discordgo.SuccessButton, CustomID: customIDWeeklyScopePrefix + "both"},
-			homeButton(),
 		}},
 	}
 }
@@ -248,6 +252,10 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 				"rendered_runes": len([]rune(renderedFinal)),
 			})
 		}()
+		// A-8 (D3): sub-action 결과 후 sticky 즉시 재발사 — 사용자가 다음 button을 화면 하단에서
+		// 즉시 클릭 가능. 정상/실패 모든 종료 경로에서 발사 (corpus 살아있는데 sticky 위로 올라가서
+		// 안 보이는 회귀 방어). LIFO 순서로 EndWithArtifact 다음에 실행.
+		defer sendSticky(s, sess)
 	}
 
 	owner, name, ok := splitRepoFullName(fullName)
@@ -303,13 +311,8 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 		fullName, scope, since.UTC().Format(time.RFC3339), len(issues), len(commits), len([]rune(directive)))
 
 	if len(issues) == 0 && len(commits) == 0 {
-		s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-			Content: fmt.Sprintf("`%s` 레포에서 해당 범위(%s) 활동이 없습니다.", fullName, scope),
-			Components: []discordgo.MessageComponent{
-				discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}},
-			},
-		})
-		// 빈 결과여도 세션 유지 — 사용자가 다른 메뉴를 바로 누를 수 있게.
+		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("`%s` 레포에서 해당 범위(%s) 활동이 없습니다.", fullName, scope))
+		// 빈 결과여도 세션 유지 — super-session sticky가 다음 작업을 안내.
 		sess.State = StateSelectMode
 		return
 	}
@@ -392,115 +395,53 @@ func weeklyAnalyzingMessage(scope llm.WeeklyScope, issueCount, commitCount int) 
 	}
 }
 
-// weeklyFollowupComponents는 분석 결과 메시지 하단에 첨부하는 follow-up 버튼들을 만든다.
-// scope=Issues에서는 커밋 윈도우가 의미 없으므로 [기간 변경] 버튼을 노출하지 않는다.
-// closeableCount > 0 일 때만 두 번째 row에 [닫아도 될 이슈 N건 닫기] 버튼을 추가한다.
-func weeklyFollowupComponents(closeableCount int, scope llm.WeeklyScope) []discordgo.MessageComponent {
-	row1 := []discordgo.MessageComponent{
-		discordgo.Button{Label: "추가 요청", Style: discordgo.PrimaryButton, CustomID: customIDWeeklyDirectiveBtn},
+// weeklyFollowupComponents는 분석 결과 메시지 하단에 첨부하는 액션 버튼들을 만든다.
+//
+// D1 정책 (UX 재설계 2026-05): 네비게이션류 follow-up button [다시 분석][기간 변경][미팅 시작][처음 메뉴]
+// 모두 폐기. 후속 작업은 super-session sticky 또는 다시 [GitHub 주간 분석]을 처음부터 누르는 식.
+//
+// 남는 행은 closeableCount > 0 일 때만 [닫아도 될 이슈 N건 닫기] 한 줄 — destructive action이라
+// 결과 메시지 컨텍스트(closeable 후보 목록)에 묶여 있어야 안전하므로 sticky로 옮길 수 없음.
+//
+// scope 인자는 D1 이전엔 [기간 변경] 노출 여부 가르는 용도였지만 현재는 미사용. 시그니처는 호출측
+// 변경 최소화 위해 유지 — 향후 필요해지면 활용.
+func weeklyFollowupComponents(closeableCount int, _ llm.WeeklyScope) []discordgo.MessageComponent {
+	if closeableCount <= 0 {
+		return nil
 	}
-	if scope.IncludesCommits() {
-		row1 = append(row1, discordgo.Button{Label: "기간 변경", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyPeriodPromptBtn})
-	}
-	row1 = append(row1,
-		discordgo.Button{Label: "다시 분석", Style: discordgo.SecondaryButton, CustomID: customIDWeeklyRetryBtn},
-		discordgo.Button{Label: "미팅 시작", Style: discordgo.SuccessButton, CustomID: customIDWeeklyToMeetingBtn},
-		discordgo.Button{Label: "처음 메뉴", Style: discordgo.SecondaryButton, CustomID: customIDHomeBtn},
-	)
-	rows := []discordgo.MessageComponent{discordgo.ActionsRow{Components: row1}}
-
-	if closeableCount > 0 {
-		rows = append(rows, discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{
 				Label:    fmt.Sprintf("닫아도 될 이슈 %d건 닫기", closeableCount),
 				Style:    discordgo.DangerButton,
 				CustomID: customIDWeeklyCloseStartBtn,
 			},
-		}})
+		}},
 	}
-	return rows
-}
-
-// homeButton은 follow-up이 부적절한 곳에서 단독 노출하는 [처음 메뉴] 버튼.
-func homeButton() discordgo.MessageComponent {
-	return discordgo.Button{Label: "처음 메뉴", Style: discordgo.SecondaryButton, CustomID: customIDHomeBtn}
 }
 
 // =====================================================================
 // follow-up 핸들러
 // =====================================================================
 
-// handleWeeklyDirective는 [추가 요청] 클릭 시 directive 입력 대기 상태로 전환한다.
-func handleWeeklyDirective(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
-	if sess.LastWeeklyRepo == "" {
-		respondInteraction(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
-		return
-	}
-	sess.State = StateWeeklyAwaitDirective
-	respondInteraction(s, i,
-		"원하는 분석 방향을 한 메시지로 적어주세요.\n"+
-			"예) `프론트엔드 라벨 이슈만 / 라벨 정합성 더 깊게 / 닫아도 될 이슈 후보 더 보수적으로`\n"+
-			"_(빠져나가려면 `취소` 입력 — 미팅 발화로 복귀)_")
-}
+// D1/D2 정책 폐기 함수/state (UX 재설계 2026-05):
+//   - handleWeeklyDirective / handleWeeklyAwaitDirectiveMessage (D2 — directive 입력 대기 state 제거)
+//   - handleWeeklyPeriodPrompt (D1 — follow-up [기간 변경] 폐기, 첫 분석 prompt만 유지)
+//   - handleWeeklyRetry        (D1 — follow-up [다시 분석] 폐기)
+//   - handleWeeklyToMeeting    (D1 — follow-up [미팅 시작] 폐기, 미팅 시작은 메인 채널에서)
+//   - handleHome               (D1 — [처음 메뉴] 폐기, super-session sticky가 항상 노출)
+//
+// "더 깊게/다른 기간으로" 분석 원하면 super-session sticky의 [GitHub 주간 분석] button을 다시 클릭
+// (처음부터). directive 입력 대기 / follow-up navigation은 사용자를 button 없는 modal-like state에
+// 가두는 회귀(2026-05-15)의 근본 원인이라 제거.
+//
+// 보존: sess.LastWeekly* 필드는 finalize 시 ContextNotes corpus 재구성용으로 유지.
+//        sess.LastWeeklyDirective는 D2 폐기 후 zero 값으로만 채워짐 (구조적 호환).
 
-// handleWeeklyAwaitDirectiveMessage는 사용자가 directive 텍스트를 보냈을 때 호출된다.
-func handleWeeklyAwaitDirectiveMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess *Session) {
-	content := strings.TrimSpace(m.Content)
-	sess.UpdatedAt = time.Now()
-
-	if content == "" {
-		s.ChannelMessageSend(m.ChannelID, "지시가 비어 있습니다. 다시 입력해주세요.")
-		return
-	}
-	if content == "취소" {
-		// super-session: StateMeeting 유지 — 후속 발화가 corpus에 계속 누적.
-		// legacy: SelectMode + [처음 메뉴].
-		if sess.Mode == ModeMeeting {
-			sess.State = StateMeeting
-			s.ChannelMessageSend(m.ChannelID, "추가 요청을 취소했습니다. 미팅이 계속 진행 중입니다 (메시지를 자유롭게 입력하세요).")
-		} else {
-			sess.State = StateSelectMode
-			s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
-				Content:    "추가 요청을 취소했습니다.",
-				Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}}},
-			})
-		}
-		return
-	}
-	if sess.LastWeeklyRepo == "" {
-		s.ChannelMessageSend(m.ChannelID, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
-		sess.State = StateSelectMode
-		return
-	}
-
-	log.Printf("[주간/directive] 캡처 thread=%s by=%s runes=%d",
-		sess.ThreadID, m.Author.Username, len([]rune(content)))
-	s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("지시 반영하여 다시 분석합니다.\n> %s", truncate(content, 200)))
-	now := time.Now()
-	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, now.Add(-commitWindow), now, content, sess.LastWeeklyScope)
-}
-
-// handleWeeklyPeriodPrompt는 follow-up [기간 변경] 클릭 시 드롭다운 + [확인] sub-prompt를 띄운다.
-// 첫 분석 흐름의 prompt는 handleWeeklyScopeSelect에서 직접 발사하므로 여기는 follow-up 전용 진입점.
-// 드롭다운에서 "직접 입력"을 고르면 modal로 사용자가 임의 시작일(YYYY-MM-DD, 30일 이내)을 지정한다.
-func handleWeeklyPeriodPrompt(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
-	if sess.LastWeeklyRepo == "" {
-		respondInteraction(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
-		return
-	}
-	if !sess.LastWeeklyScope.IncludesCommits() {
-		respondInteraction(s, i, "이슈 전용 분석에는 기간 변경이 적용되지 않습니다.")
-		return
-	}
-	respondInteractionWithComponents(s, i,
-		fmt.Sprintf("어느 기간으로 다시 분석할까요? (기본값: 지난 %d일)", weeklyPeriodDefaultDays),
-		weeklyPeriodPromptComponents(sess.PendingPeriodDays),
-	)
-}
-
-// weeklyPeriodPromptComponents는 [드롭다운][확인][처음 메뉴] 두 row를 만든다.
-// 첫 분석 + follow-up 두 흐름에서 재사용된다. currentDays는 드롭다운에서 어느 옵션을 default로
-// 표시할지 결정 — 0 또는 음수면 weeklyPeriodDefaultDays(7)로 fallback.
+// weeklyPeriodPromptComponents는 [드롭다운][확인] 두 row를 만든다 (첫 분석 흐름 전용).
+// currentDays는 드롭다운에서 어느 옵션을 default로 표시할지 결정 — 0 또는 음수면 weeklyPeriodDefaultDays(7)로 fallback.
+//
+// D1 정책: [처음 메뉴] button 폐기. 흐름 중단은 super-session sticky 또는 새 button 클릭으로.
 func weeklyPeriodPromptComponents(currentDays int) []discordgo.MessageComponent {
 	if currentDays <= 0 {
 		currentDays = weeklyPeriodDefaultDays
@@ -533,7 +474,6 @@ func weeklyPeriodPromptComponents(currentDays int) []discordgo.MessageComponent 
 				Style:    discordgo.SuccessButton,
 				CustomID: customIDWeeklyPeriodConfirm,
 			},
-			homeButton(),
 		}},
 	}
 }
@@ -609,8 +549,8 @@ func handleWeeklyPeriodConfirm(s *discordgo.Session, i *discordgo.InteractionCre
 
 // resolveWeeklyPeriodContext는 기간 핸들러가 사용할 (repo, scope, directive)를 결정한다.
 // 우선순위:
-//  1. PendingWeeklyRepo가 세팅되어 있으면 첫 분석 흐름 — Pending* 사용 (directive는 첫 분석에선 빈 값)
-//  2. 그 외엔 follow-up — LastWeekly* 컨텍스트 사용
+//  1. PendingWeeklyRepo가 세팅되어 있으면 첫 분석 흐름 — Pending* 사용 (directive는 항상 빈 값 — D2 폐기)
+//  2. 그 외엔 LastWeekly* fallback (D1 폐기 후 도달 경로 없음 — 방어용으로만 유지)
 //
 // 두 컨텍스트 모두 비어 있으면 ok=false.
 func resolveWeeklyPeriodContext(sess *Session) (repo string, scope llm.WeeklyScope, directive string, ok bool) {
@@ -738,42 +678,8 @@ func extractModalTextValue(i *discordgo.InteractionCreate, fieldID string) strin
 	return ""
 }
 
-// handleWeeklyRetry는 [다시 분석] 클릭 시 같은 repo + 기간 + directive + scope로 재호출한다.
-func handleWeeklyRetry(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
-	if sess.LastWeeklyRepo == "" {
-		respondInteraction(s, i, "이전 주간 분석 정보가 없습니다. 다시 [주간 정리]부터 시작해주세요.")
-		return
-	}
-	respondInteraction(s, i, fmt.Sprintf("`%s` 레포를 같은 조건으로 다시 분석합니다.", sess.LastWeeklyRepo))
-	runWeeklyAnalyze(s, sess, sess.LastWeeklyRepo, sess.LastWeeklySince, sess.LastWeeklyUntil, sess.LastWeeklyDirective, sess.LastWeeklyScope)
-}
-
-// handleWeeklyToMeeting는 [미팅 시작] 클릭 시 분석 결과 마크다운을 미팅 첫 노트로 주입한 뒤 미팅 모드 진입.
-func handleWeeklyToMeeting(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
-	if sess.LastWeeklyResponse == nil || strings.TrimSpace(sess.LastWeeklyResponse.Markdown) == "" {
-		respondInteraction(s, i, "주입할 주간 분석 결과가 없습니다.")
-		return
-	}
-	header := fmt.Sprintf("[주간 분석 결과 — %s, %s ~ %s]",
-		sess.LastWeeklyRepo,
-		sess.LastWeeklySince.Format("2006-01-02"),
-		sess.LastWeeklyUntil.Format("2006-01-02"))
-	body := header + "\n" + strings.TrimSpace(sess.LastWeeklyResponse.Markdown)
-
-	// 미팅 모드 초기화 후 분석 본문을 첫 노트로 추가 (Author는 가상 "weekly_report")
-	sess.Mode = ModeMeeting
-	sess.State = StateMeeting
-	sess.Notes = nil
-	sess.Speakers = nil
-	sess.NotesAtLastSticky = 0
-	sess.StickyMessageID = ""
-	sess.Directive = ""
-
-	sess.AddNote("weekly_report", body)
-
-	respondInteraction(s, i, "분석 결과를 미팅 첫 노트로 주입했습니다. 메시지를 자유롭게 입력하세요.\n\"미팅 종료\"로 마무리.")
-	sendSticky(s, sess)
-}
+// handleWeeklyRetry / handleWeeklyToMeeting 폐기 — D1 정책 (UX 재설계 2026-05).
+// 후속 작업은 super-session sticky 또는 새 button 클릭으로.
 
 // handleWeeklyCloseStart는 [닫아도 될 이슈 N건 닫기] 클릭 시 확인 prompt를 노출한다.
 func handleWeeklyCloseStart(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
@@ -793,9 +699,9 @@ func handleWeeklyCloseStart(s *discordgo.Session, i *discordgo.InteractionCreate
 	}
 	b.WriteString("\n진행할까요?")
 
+	// D1: [취소] button 폐기 — 닫기 진행을 원치 않으면 단순히 [확인]을 누르지 않으면 됨.
 	respondInteractionWithRow(s, i, b.String(),
 		discordgo.Button{Label: "확인", Style: discordgo.DangerButton, CustomID: customIDWeeklyCloseConfirmBtn},
-		discordgo.Button{Label: "취소", Style: discordgo.SecondaryButton, CustomID: customIDHomeBtn},
 	)
 }
 
@@ -852,12 +758,7 @@ func handleWeeklyCloseConfirm(s *discordgo.Session, i *discordgo.InteractionCrea
 		}
 	}
 
-	if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-		Content: b.String(),
-		Components: []discordgo.MessageComponent{
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}},
-		},
-	}); err != nil {
+	if _, err := s.ChannelMessageSend(sess.ThreadID, b.String()); err != nil {
 		log.Printf("[주간/close] ERR send result: %v", err)
 	}
 
@@ -865,38 +766,8 @@ func handleWeeklyCloseConfirm(s *discordgo.Session, i *discordgo.InteractionCrea
 	sess.LastWeeklyCloseable = nil
 }
 
-// handleHome는 [처음 메뉴] 클릭 시 세션을 SelectMode로 reset하고 초기 메뉴를 다시 노출한다.
-func handleHome(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
-	// === Phase 3 — super-session 보존 가드 ===
-	// 미팅 모드(super-session) 진행 중에 [처음 메뉴] 누르면 corpus(Notes)가 통째로 날아가는
-	// destructive reset 발생. super-session에서는 미팅 종료가 명시 [세션 종료] button — Home button은
-	// no-op + 안내로 처리해 corpus 보존.
-	//
-	// 단, 진행 중 release ctx는 Home click을 cancel signal로 간주해 정리 (codex 8차 P2) —
-	// 사용자가 release UI에서 [처음 메뉴] 누르면 진행 중 release를 포기한 것이라 ReleaseCtx 비워서
-	// 다음 [릴리즈 추가] guard가 정상 진입하도록.
-	if sess.Mode == ModeMeeting {
-		if sess.ReleaseCtx != nil && sess.ReleaseCtx.PRNumber == 0 {
-			sess.ReleaseCtx = nil
-		}
-		respondInteraction(s, i, "super-session 진행 중입니다. 종료하려면 sticky의 [세션 종료] button을 사용해주세요. (대화는 계속 corpus에 누적됩니다.)")
-		return
-	}
-	sess.Mode = ModeNormal
-	sess.State = StateSelectMode
-	sess.Notes = nil
-	sess.Speakers = nil
-	sess.NotesAtLastSticky = 0
-	sess.StickyMessageID = ""
-	sess.Directive = ""
-	respondInteractionWithRow(s, i, "무엇을 도와드릴까요?",
-		discordgo.Button{Label: "미팅", Style: discordgo.PrimaryButton, CustomID: "mode_meeting"},
-		discordgo.Button{Label: "주간 정리", Style: discordgo.PrimaryButton, CustomID: "mode_weekly"},
-		discordgo.Button{Label: "에이전트", Style: discordgo.SuccessButton, CustomID: customIDAgentBtn},
-		discordgo.Button{Label: "릴리즈", Style: discordgo.DangerButton, CustomID: customIDReleaseEntry},
-		discordgo.Button{Label: "상태 조회", Style: discordgo.SecondaryButton, CustomID: "mode_status"},
-	)
-}
+// handleHome 폐기 — D1 정책 (UX 재설계 2026-05).
+// super-session에서는 sticky의 [세션 종료] button만, legacy(ModeNormal)에서는 신규 mention으로 새 스레드.
 
 // =====================================================================
 // 헬퍼

@@ -149,20 +149,10 @@ func finalizeMeeting(
 
 	sess.LastBotSummary = rendered
 
-	// 결과 마크다운은 sendLongMessage로 (분할 가능). [처음 메뉴] 버튼은 별도 메시지로 첨부 →
-	// 사용자가 같은 스레드에서 다른 메뉴로 이어갈 수 있게 한다.
+	// 결과 마크다운은 sendLongMessage로 (분할 가능).
+	// D1 정책 (UX 재설계 2026-05): [처음 메뉴] button row 폐기. 후속 작업은 super-session sticky로.
 	if err := sendLongMessage(msg, sess.ThreadID, rendered); err != nil {
 		log.Printf("[미팅/finalize] ERR 최종 노트 전송 실패 thread=%s: %v", sess.ThreadID, err)
-	}
-	if _, err := msg.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-		Content: "이어서 다른 작업을 시작하려면 [처음 메뉴]를 눌러주세요.",
-		Components: []discordgo.MessageComponent{
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-				discordgo.Button{Label: "처음 메뉴", Style: discordgo.SecondaryButton, CustomID: customIDHomeBtn},
-			}},
-		},
-	}); err != nil {
-		log.Printf("[미팅/finalize] ERR 처음 메뉴 버튼 전송 실패 thread=%s: %v", sess.ThreadID, err)
 	}
 	return false
 }
@@ -430,44 +420,62 @@ func interimControlComponents() []discordgo.MessageComponent {
 // 이 값을 낮추면 사용성은 좋지만 API 호출 부담이 늘고, 높이면 반대.
 const stickyRefreshThreshold = 3
 
-// superSessionStickyComponents는 Phase 3 super-session sticky의 6 button 행을 만든다.
+// superSessionStickyComponents는 super-session sticky의 7 button을 V4 layout으로 만든다.
 //
-// 레이아웃 (Discord row 1당 max 5 button):
+// V4 layout — 자주 쓰는 button 위에 크게, 나머지 작게 한 줄 (계층적 강조):
 //
-//	Row 1: [중간 요약] [주간 추가] [릴리즈 추가] [에이전트] [노트 정리(통합)]
-//	Row 2: [세션 종료]
+//	Row 1 (primary 강조): [중간 요약] [회의록 정리]
+//	Row 2 (secondary + danger 끝): [GitHub 주간 분석] [릴리즈 PR 만들기] [AI에게 질문] [외부 문서 첨부] [세션 종료]
 //
-// 사용자가 가장 자주 누르는 button을 위에 배치 (정리본/요약). 종료는 뚜렷이 분리.
-//
-// 핸들러:
-//   - 중간 요약 / 노트 정리: 기존 customIDInterimBtn / customIDFinalizeSummarized 재사용
-//   - 주간/릴리즈/에이전트: chunk 3B에서 in-thread sub-action 핸들러 추가 예정 (현재는 안내 stub)
-//   - 세션 종료: chunk 3D에서 finalize와 분리된 명시 종료 핸들러 (현재는 안내 stub)
+// 라벨 정책 (UX 재설계 — 이전 모호한 라벨에서 명확화):
+//   - 중간 요약            : 지금까지 회의를 짧게 임시 정리
+//   - 회의록 정리           : 4 포맷 정리본 추출 (가장 자주 누름 → SuccessButton 강조)
+//   - GitHub 주간 분석      : 레포 활동을 회의 자료에 추가
+//   - 릴리즈 PR 만들기      : 모듈 → bump → PR 자동 생성 (라인=백엔드/프론트엔드/전체 분기)
+//   - AI에게 질문          : 자유 자연어 분석 요청
+//   - 외부 문서 첨부        : 다음 메시지(긴 paste 등)를 외부 자료로 분류
+//   - 세션 종료            : 미팅 마무리 (button만 — D4 정책)
 func superSessionStickyComponents() []discordgo.MessageComponent {
 	return []discordgo.MessageComponent{
+		// Row 1 — primary 강조 (정리류)
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{Label: "중간 요약", Style: discordgo.PrimaryButton, CustomID: customIDInterimBtn},
-				discordgo.Button{Label: "주간 추가", Style: discordgo.SecondaryButton, CustomID: customIDSubActionWeekly},
-				discordgo.Button{Label: "릴리즈 추가", Style: discordgo.SecondaryButton, CustomID: customIDSubActionRelease},
-				discordgo.Button{Label: "에이전트", Style: discordgo.SecondaryButton, CustomID: customIDSubActionAgent},
-				discordgo.Button{Label: "노트 정리", Style: discordgo.SuccessButton, CustomID: customIDFinalizeSummarized},
+				discordgo.Button{Label: "회의록 정리", Style: discordgo.SuccessButton, CustomID: customIDFinalizeSummarized},
 			},
 		},
+		// Row 2 — secondary + danger 끝 (자료/제어)
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
-				discordgo.Button{Label: "외부 자료 첨부", Style: discordgo.SecondaryButton, CustomID: customIDExternalAttach},
+				discordgo.Button{Label: "GitHub 주간 분석", Style: discordgo.SecondaryButton, CustomID: customIDSubActionWeekly},
+				discordgo.Button{Label: "릴리즈 PR 만들기", Style: discordgo.SecondaryButton, CustomID: customIDSubActionRelease},
+				discordgo.Button{Label: "AI에게 질문", Style: discordgo.SecondaryButton, CustomID: customIDSubActionAgent},
+				discordgo.Button{Label: "외부 문서 첨부", Style: discordgo.SecondaryButton, CustomID: customIDExternalAttach},
 				discordgo.Button{Label: "세션 종료", Style: discordgo.DangerButton, CustomID: customIDSessionEnd},
 			},
 		},
 	}
 }
 
-// buildSuperSessionStickyMessageSend는 Phase 3 sticky payload를 생성한다.
-// 본문: "super-session 진행 중 · 메모 N건". 6 button 첨부.
+// buildSuperSessionStickyMessageSend는 sticky payload를 생성한다.
+//
+// 본문: 헤더 + 7 button 설명 표 (SPEC 카드 형태). 매 갱신마다 같은 텍스트 — 사용자 학습 비용 절감.
+// button만으로 모든 명령 가능 (D4 정책 — 텍스트 escape 폐기).
 func buildSuperSessionStickyMessageSend(noteCount int) *discordgo.MessageSend {
+	body := fmt.Sprintf(
+		"`super-session 진행 중` · 메모 **%d건**\n"+
+			"```\n"+
+			"[중간 요약]        지금까지 회의를 짧게 임시 정리\n"+
+			"[회의록 정리]      4 포맷 정리본 추출 (가장 자주)\n"+
+			"[GitHub 주간 분석] 레포 활동(이슈/커밋)을 회의 자료에 추가\n"+
+			"[릴리즈 PR 만들기] 모듈 → bump → PR 자동 생성\n"+
+			"[AI에게 질문]      자유 자연어 분석 요청\n"+
+			"[외부 문서 첨부]    다음 메시지를 외부 자료로 분류\n"+
+			"[세션 종료]        미팅 마무리\n"+
+			"```", noteCount,
+	)
 	return &discordgo.MessageSend{
-		Content:    fmt.Sprintf("`super-session 진행 중` · 메모 **%d건** · sub-action은 같은 스레드에 누적됩니다", noteCount),
+		Content:    body,
 		Components: superSessionStickyComponents(),
 	}
 }

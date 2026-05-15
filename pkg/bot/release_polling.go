@@ -127,7 +127,10 @@ func runOnePollCycle(ctx context.Context, s *discordgo.Session, sess *Session, r
 
 // releasePollComponents는 폴링 패널의 버튼 행을 만든다.
 // prURL이 비어있지 않으면 GitHub PR로 바로 이동하는 LinkButton 을 맨 앞에 노출.
-// stopped=true 면 [폴링 중단] 버튼을 제거하고 [PR 열기][처음 메뉴] 만 남긴다.
+// stopped=true 면 [폴링 중단] 버튼을 제거하고 [PR 열기]만 남긴다.
+//
+// D1 정책: [처음 메뉴] button 폐기 — 후속 작업은 super-session sticky로.
+// row가 비면 nil 반환 (Discord component row 0개를 강제하지 않음).
 func releasePollComponents(prURL string, stopped bool) []discordgo.MessageComponent {
 	row := []discordgo.MessageComponent{}
 	if prURL != "" {
@@ -144,7 +147,9 @@ func releasePollComponents(prURL string, stopped bool) []discordgo.MessageCompon
 			CustomID: customIDReleasePollStop,
 		})
 	}
-	row = append(row, homeButton())
+	if len(row) == 0 {
+		return nil
+	}
 	return []discordgo.MessageComponent{discordgo.ActionsRow{Components: row}}
 }
 

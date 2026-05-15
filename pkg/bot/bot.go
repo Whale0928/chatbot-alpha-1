@@ -31,15 +31,47 @@ const (
 	ModeMeeting             // 미팅 모드
 )
 
+// String은 logger 컨벤션 mode= 필드 출력에 사용 (kubectl logs grep 친화).
+func (m SessionMode) String() string {
+	switch m {
+	case ModeNormal:
+		return "normal"
+	case ModeMeeting:
+		return "meeting"
+	default:
+		return "unknown"
+	}
+}
+
 type SessionState int
 
 const (
 	StateSelectMode            SessionState = iota // 기능 선택 대기
 	StateMeeting                                   // 미팅 진행 중 (조용히 수집)
 	StateMeetingAwaitDirective                     // 미팅 종료 후 사용자 정리 지시 입력 대기
-	StateWeeklyAwaitDirective                      // 주간 분석 결과 후 사용자 추가 요청 입력 대기
-	StateAgentAwaitInput                           // [에이전트] 클릭 후 자유 지시 입력 대기
+	// StateWeeklyAwaitDirective 폐기 (D2 — weekly directive 흐름 제거).
+	// iota 순서 보존 위해 자리는 유지 (deprecated alias로 다른 값과 충돌 방지).
+	stateWeeklyAwaitDirective_deprecated
+	StateAgentAwaitInput // [에이전트] 클릭 후 자유 지시 입력 대기
 )
+
+// String은 logger 컨벤션 state= 필드 출력에 사용 (kubectl logs grep 친화).
+func (s SessionState) String() string {
+	switch s {
+	case StateSelectMode:
+		return "select_mode"
+	case StateMeeting:
+		return "meeting"
+	case StateMeetingAwaitDirective:
+		return "meeting_await_directive"
+	case stateWeeklyAwaitDirective_deprecated:
+		return "weekly_await_directive_deprecated"
+	case StateAgentAwaitInput:
+		return "agent_await_input"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(s))
+	}
+}
 
 // Session은 디스코드 스레드와 1:1 매핑되는 대화 단위.
 // 필드별 동시성 책임:
@@ -142,6 +174,12 @@ type Session struct {
 	// 라인/모듈/bump 선택 단계에서 누적되고, 진행 단계와 폴링 단계(Slice 7)에서도 참조된다.
 	// nil은 진행 중인 릴리즈 흐름 없음.
 	ReleaseCtx *ReleaseContext
+
+	// BatchReleaseCtx는 [전체] 라인 선택의 batch release 흐름 컨텍스트 (B-3).
+	// ReleaseCtx와 상호 배타 — 동시에 둘 다 활성이면 race 위험. customIDSubActionRelease 가드와
+	// [전체] 진입 가드가 cross-check해서 한 시점에 하나만 활성 보장.
+	// nil은 batch 진행 중 아님.
+	BatchReleaseCtx *BatchReleaseContext
 }
 
 // =====================================================================

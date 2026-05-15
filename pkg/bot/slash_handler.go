@@ -14,10 +14,14 @@ import (
 // 슬래시 명령어 라우팅 + 세션 생성
 // =====================================================================
 //
-// /meeting   → 즉시 미팅 모드 진입 + sticky
-// /weekly    → 주간 정리 레포 선택 버튼
-// /agent     → instruction 옵션 있으면 즉시 실행, 없으면 입력 대기
-// /session   → @멘션과 동일한 빈 세션 + 메뉴
+// D1 정책 (UX 재설계 2026-05): 모든 슬래시 진입은 super-session(ModeMeeting) + sticky.
+// standalone weekly/agent/release 흐름 폐기 — sticky의 sub-action button으로 통일.
+//
+// /meeting   → super-session 시작 (default 안내)
+// /weekly    → super-session 시작 + sticky [GitHub 주간 분석] 안내
+// /agent     → super-session 시작 + sticky [AI에게 질문] 안내. instruction 옵션 있으면 즉시 실행
+// /release   → super-session 시작 + sticky [릴리즈 PR 만들기] 안내
+// /session   → super-session 시작 (default 안내, /meeting과 동일)
 //
 // 모든 명령어는 채널에서 호출되어 새 스레드를 만들고 그 안에서 흐름을 진행한다.
 // 사용자에게는 ephemeral followup으로 스레드 링크만 보내고, 본 흐름은 스레드 안에서.
@@ -69,7 +73,7 @@ func startSlashSession(s *discordgo.Session, i *discordgo.InteractionCreate, ent
 	}
 
 	// 이미 세션이 있는 채널(=스레드)에서 슬래시를 호출한 경우는 스레드를 또 만들지 않고 차단.
-	// 스레드 안에서는 [처음 메뉴] 버튼이나 텍스트 명령으로 모드 전환을 사용해야 한다.
+	// 스레드 안에서는 sticky button으로 모든 sub-action을 사용해야 한다 (D1/D4 정책).
 	if existing := lookupSession(i.ChannelID); existing != nil {
 		respondInteractionEphemeral(s, i,
 			"이미 세션이 진행 중인 스레드입니다. 일반 채널에서 슬래시 명령어를 사용해주세요.")
@@ -130,87 +134,62 @@ func startSlashSession(s *discordgo.Session, i *discordgo.InteractionCreate, ent
 	enterSlashMode(s, sess, entry, agentInstruction)
 }
 
-// enterSlashMode는 entry별로 스레드 안에서 첫 메시지/버튼/sticky를 발사한다.
-// 사전 조건: sess가 sessions 맵에 등록되어 있고 thread가 생성된 직후.
+// enterSlashMode는 entry별로 스레드 안에서 super-session 진입을 발사한다.
+//
+// D1 정책 (UX 재설계 2026-05): 모든 slash 진입은 super-session(ModeMeeting) 시작 + sticky.
+// 사용자는 sticky button으로 모든 sub-action을 in-thread 호출. standalone weekly/agent/release
+// 흐름은 폐기 — 같은 button을 sticky에서 누르는 게 동일 효과 + corpus 누적의 장점이 있음.
+//
+// 예외: /agent instruction:... 옵션 즉시 실행은 super-session 진입 + sticky 발사 후 곧바로
+// runAgentInstruction을 호출해 사용자가 한 번에 결과를 받게 한다.
 func enterSlashMode(s *discordgo.Session, sess *Session, entry sessionEntry, agentInstruction string) {
-	switch entry {
-	case sessionEntryHome:
-		if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-			Content:    "무엇을 도와드릴까요?",
-			Components: homeMenuComponents(),
-		}); err != nil {
-			log.Printf("[slash/home] ERR send menu: %v", err)
-		}
+	// 모든 entry를 super-session으로 통일.
+	sess.Mode = ModeMeeting
+	sess.State = StateMeeting
 
-	case sessionEntryMeeting:
-		sess.Mode = ModeMeeting
-		sess.State = StateMeeting
-		if _, err := s.ChannelMessageSend(sess.ThreadID,
-			"미팅을 시작합니다. 메시지를 자유롭게 입력하세요. "+
-				"하단 [중간 요약] 버튼으로 진행 상황을 정리할 수 있고, "+
-				"[미팅 종료] 버튼 또는 \"미팅 종료\" 입력으로 마무리할 수 있습니다."); err != nil {
-			log.Printf("[slash/meeting] ERR send intro: %v", err)
-		}
-		sendSticky(s, sess)
+	intro := superSessionIntro(entry)
+	if _, err := s.ChannelMessageSend(sess.ThreadID, intro); err != nil {
+		log.Printf("[slash/intro] ERR thread=%s: %v", sess.ThreadID, err)
+	}
+	sendSticky(s, sess)
 
-	case sessionEntryWeekly:
-		sendWeeklyRepoButtons(s, sess.ThreadID)
-
-	case sessionEntryAgent:
+	// /agent instruction:... 옵션은 즉시 실행 — sticky까지 갖춰진 super-session에서 첫 sub-action.
+	// runAgentInstruction은 끝나면 본인 흐름에서 sticky 재발사 (A-8).
+	if entry == sessionEntryAgent {
 		if agentInstruction = strings.TrimSpace(agentInstruction); agentInstruction != "" {
+			if githubClient == nil {
+				s.ChannelMessageSend(sess.ThreadID, "GITHUB_TOKEN이 설정되어 있지 않아 에이전트 sub-action을 사용할 수 없습니다.")
+				return
+			}
+			if llmClient == nil {
+				s.ChannelMessageSend(sess.ThreadID, "LLM 클라이언트가 초기화되지 않았습니다.")
+				return
+			}
 			runAgentInstruction(s, sess, agentInstruction, "slash")
-			return
 		}
-		// instruction 옵션이 없으면 텍스트 입력 대기 흐름. 검증은 handleAgent와 동일하게 수행.
-		if githubClient == nil {
-			s.ChannelMessageSend(sess.ThreadID, "GITHUB_TOKEN이 설정되어 있지 않아 에이전트를 시작할 수 없습니다.")
-			return
-		}
-		if llmClient == nil {
-			s.ChannelMessageSend(sess.ThreadID, "LLM 클라이언트가 초기화되지 않았습니다.")
-			return
-		}
-		sess.State = StateAgentAwaitInput
-		s.ChannelMessageSend(sess.ThreadID,
-			"에이전트 모드로 진입했습니다. 자유롭게 지시해주세요.\n"+
-				"예) `워크스페이스에서 인프라 관련 열려있는 이슈들 가져와`\n"+
-				"`취소` 입력 시 종료")
+	}
+}
 
+// superSessionIntro는 slash entry별로 약간 다른 안내 메시지를 만든다.
+// 본문은 동일하게 sticky button 사용을 안내하되, 첫 줄에서 사용자가 입력한 slash 의도를 반영해
+// 어색함을 줄인다 (/weekly로 들어왔는데 "미팅을 시작합니다" 처럼 보이는 회귀 방어).
+func superSessionIntro(entry sessionEntry) string {
+	base := "super-session을 시작합니다. 메시지를 자유롭게 입력하세요. 하단 sticky button으로 [중간 요약]/[회의록 정리]/[GitHub 주간 분석]/[릴리즈 PR 만들기]/[AI에게 질문]/[외부 문서 첨부]/[세션 종료]를 실행할 수 있습니다."
+	switch entry {
+	case sessionEntryWeekly:
+		return "super-session 시작 — 주간 분석을 원하시면 sticky의 [GitHub 주간 분석] button을 눌러주세요.\n\n" + base
+	case sessionEntryAgent:
+		return "super-session 시작 — 에이전트에게 질문하려면 sticky의 [AI에게 질문] button을 눌러주세요.\n\n" + base
 	case sessionEntryRelease:
-		// 릴리즈 흐름은 라인 선택 prompt 부터. handleReleaseEntry 와 동일한 안내 + 컴포넌트.
-		if githubClient == nil {
-			s.ChannelMessageSend(sess.ThreadID, "GITHUB_TOKEN 이 설정되어 있지 않아 릴리즈 흐름을 시작할 수 없습니다.")
-			return
-		}
-		if llmClient == nil {
-			s.ChannelMessageSend(sess.ThreadID, "LLM 클라이언트가 초기화되지 않았습니다.")
-			return
-		}
-		sess.ReleaseCtx = &ReleaseContext{}
-		if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-			Content:    "어떤 라인을 릴리즈할까요?",
-			Components: releaseLineComponents(),
-		}); err != nil {
-			log.Printf("[slash/release] ERR send line prompt: %v", err)
-		}
+		return "super-session 시작 — 릴리즈 PR을 만들려면 sticky의 [릴리즈 PR 만들기] button을 눌러주세요.\n\n" + base
+	default:
+		return base
 	}
 }
 
-// homeMenuComponents는 [처음 메뉴]에 노출되는 5 버튼 행을 만든다.
-// openThread/handleHome과 동일한 셋. 슬래시 /session에서 재사용한다.
-func homeMenuComponents() []discordgo.MessageComponent {
-	return []discordgo.MessageComponent{
-		discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{
-				discordgo.Button{Label: "미팅", Style: discordgo.PrimaryButton, CustomID: "mode_meeting"},
-				discordgo.Button{Label: "주간 정리", Style: discordgo.PrimaryButton, CustomID: "mode_weekly"},
-				discordgo.Button{Label: "에이전트", Style: discordgo.SuccessButton, CustomID: customIDAgentBtn},
-				discordgo.Button{Label: "릴리즈", Style: discordgo.DangerButton, CustomID: customIDReleaseEntry},
-				discordgo.Button{Label: "상태 조회", Style: discordgo.SecondaryButton, CustomID: "mode_status"},
-			},
-		},
-	}
-}
+// homeMenuComponents 폐기 — D1 정책 (UX 재설계 2026-05).
+// 5 button 메뉴(미팅/주간 정리/에이전트/릴리즈/상태 조회)는 super-session 진입으로 통일됨.
+// 동일 기능은 sticky button (중간 요약/회의록 정리/GitHub 주간 분석/릴리즈 PR 만들기/AI에게 질문)으로 노출.
 
 // slashThreadName은 entry별 스레드 이름을 결정한다. Discord에서 스레드 이름이 비면 안 되므로 fallback 포함.
 func slashThreadName(entry sessionEntry) string {

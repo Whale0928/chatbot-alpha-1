@@ -134,8 +134,13 @@ func (s *Session) SnapshotNotesForCorpus() []Note {
 	return out
 }
 
-// IsMeetingEndCommand는 문자열이 정확히 미팅 종료 명령인지 판별한다.
-// 공백만 trim 후 정확 일치. "미팅 종료 시점" 같은 문장은 false.
+// IsMeetingEndCommand는 legacy "미팅 종료" 텍스트 명령 인식 함수.
+//
+// D4 button-only 정책 적용 후 호출처 모두 폐기됨. 함수 자체는 호환을 위해 보존하되 새 코드는
+// 호출하지 않는다 (사용자가 "미팅 종료" 입력해도 일반 미팅 노트로 누적).
+// 종료는 sticky [세션 종료] button만.
+//
+// Deprecated: D4 정책에서 사용 X. 텍스트 escape는 button-only 정책과 충돌하므로 새 호출처 추가 금지.
 func IsMeetingEndCommand(content string) bool {
 	trimmed := strings.TrimSpace(content)
 	return trimmed == "미팅 종료" || trimmed == "회의 종료"
