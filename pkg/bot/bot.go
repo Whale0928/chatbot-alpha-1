@@ -31,6 +31,18 @@ const (
 	ModeMeeting             // 미팅 모드
 )
 
+// String은 logger 컨벤션 mode= 필드 출력에 사용 (kubectl logs grep 친화).
+func (m SessionMode) String() string {
+	switch m {
+	case ModeNormal:
+		return "normal"
+	case ModeMeeting:
+		return "meeting"
+	default:
+		return "unknown"
+	}
+}
+
 type SessionState int
 
 const (
@@ -40,8 +52,26 @@ const (
 	// StateWeeklyAwaitDirective 폐기 (D2 — weekly directive 흐름 제거).
 	// iota 순서 보존 위해 자리는 유지 (deprecated alias로 다른 값과 충돌 방지).
 	stateWeeklyAwaitDirective_deprecated
-	StateAgentAwaitInput                           // [에이전트] 클릭 후 자유 지시 입력 대기
+	StateAgentAwaitInput // [에이전트] 클릭 후 자유 지시 입력 대기
 )
+
+// String은 logger 컨벤션 state= 필드 출력에 사용 (kubectl logs grep 친화).
+func (s SessionState) String() string {
+	switch s {
+	case StateSelectMode:
+		return "select_mode"
+	case StateMeeting:
+		return "meeting"
+	case StateMeetingAwaitDirective:
+		return "meeting_await_directive"
+	case stateWeeklyAwaitDirective_deprecated:
+		return "weekly_await_directive_deprecated"
+	case StateAgentAwaitInput:
+		return "agent_await_input"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(s))
+	}
+}
 
 // Session은 디스코드 스레드와 1:1 매핑되는 대화 단위.
 // 필드별 동시성 책임:

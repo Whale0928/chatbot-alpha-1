@@ -216,16 +216,24 @@ func handleReleaseLine(s *discordgo.Session, i *discordgo.InteractionCreate, ses
 		// 항상 빈 ReleaseCtx{}를 만들기 때문에 PRNumber==0 가드는 정상 [전체] 진입도 reject.
 		// rc.InProgress는 runReleaseFlow가 실제 goroutine 실행 중일 때만 true.
 		if sess.ReleaseCtx != nil && sess.ReleaseCtx.InProgress {
+			logGuard("release/batch", "single_in_progress", "단일 release 진행 중 — [전체] 진입 reject",
+				lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+				lf("module", sess.ReleaseCtx.Module.Key))
 			respondInteraction(s, i, "현재 진행 중인 단일 릴리즈가 있습니다. 완료 후 [전체]를 다시 시도해주세요.")
 			return
 		}
 		if sess.BatchReleaseCtx != nil && sess.BatchReleaseCtx.InProgress {
+			logGuard("release/batch", "batch_in_progress", "batch release 진행 중 — 새 [전체] 진입 reject",
+				lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+				lf("selected", sess.BatchReleaseCtx.SelectedCount()))
 			respondInteraction(s, i, "이미 batch release가 진행 중입니다.")
 			return
 		}
 		sess.ReleaseCtx = nil
 		modules := release.Modules
 		if len(modules) == 0 {
+			logGuard("release/batch", "no_modules", "release.Modules 비어있음 — [전체] 진입 불가",
+				lf("thread", sess.ThreadID))
 			respondInteraction(s, i, "등록된 release 모듈이 없습니다 (pkg/release/types.go의 Modules 확인).")
 			return
 		}
@@ -233,8 +241,9 @@ func handleReleaseLine(s *discordgo.Session, i *discordgo.InteractionCreate, ses
 			Modules:    modules,
 			Selections: map[string]release.BumpType{},
 		}
-		log.Printf("[릴리즈/batch] 진입 thread=%s by=%s modules=%d",
-			sess.ThreadID, interactionCallerUsername(i), len(modules))
+		logEvent("release/batch", "start", "[전체] 진입 — 모듈 선택 prompt 발사",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+			lf("modules", len(modules)))
 		sendBatchReleasePrompt(s, i, sess)
 		return
 	default:
@@ -1057,24 +1066,34 @@ func sendBatchReleasePrompt(s *discordgo.Session, i *discordgo.InteractionCreate
 // 새 선택을 반영해 사용자가 자기 선택을 시각적으로 확인할 수 있다.
 func handleBatchReleaseSelect(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session, moduleKey string) {
 	if sess.BatchReleaseCtx == nil {
+		logGuard("release/batch", "ctx_expired", "BatchReleaseCtx nil — select reject",
+			lf("thread", sess.ThreadID), lf("module", moduleKey))
 		respondInteractionEphemeral(s, i, "batch release 컨텍스트가 만료되었습니다. sticky의 [릴리즈 PR 만들기] → [전체]로 다시 시작해주세요.")
 		return
 	}
 	if sess.BatchReleaseCtx.InProgress {
+		logGuard("release/batch", "in_progress", "batch 진행 중 — select reject",
+			lf("thread", sess.ThreadID), lf("module", moduleKey))
 		respondInteractionEphemeral(s, i, "이미 batch release가 진행 중입니다.")
 		return
 	}
 	if _, ok := release.FindModule(moduleKey); !ok {
+		logError("release/batch", "unknown_module", "FindModule 실패 — select reject", nil,
+			lf("thread", sess.ThreadID), lf("module", moduleKey))
 		respondInteractionEphemeral(s, i, fmt.Sprintf("알 수 없는 모듈: %q", moduleKey))
 		return
 	}
 	data := i.MessageComponentData()
 	if len(data.Values) == 0 {
+		logError("release/batch", "empty_select_value", "SelectMenu values 비어있음", nil,
+			lf("thread", sess.ThreadID), lf("module", moduleKey))
 		respondInteractionEphemeral(s, i, "선택값이 비어 있습니다.")
 		return
 	}
 	bump, ok := release.ParseBumpType(data.Values[0])
 	if !ok {
+		logError("release/batch", "unknown_bump", "ParseBumpType 실패", nil,
+			lf("thread", sess.ThreadID), lf("module", moduleKey), lf("value", data.Values[0]))
 		respondInteractionEphemeral(s, i, fmt.Sprintf("알 수 없는 bump: %q", data.Values[0]))
 		return
 	}
@@ -1082,8 +1101,9 @@ func handleBatchReleaseSelect(s *discordgo.Session, i *discordgo.InteractionCrea
 		sess.BatchReleaseCtx.Selections = map[string]release.BumpType{}
 	}
 	sess.BatchReleaseCtx.Selections[moduleKey] = bump
-	log.Printf("[릴리즈/batch] select thread=%s module=%s bump=%s total=%d",
-		sess.ThreadID, moduleKey, bump, sess.BatchReleaseCtx.SelectedCount())
+	logEvent("release/batch", "select", "모듈 bump 선택 박제",
+		lf("thread", sess.ThreadID), lf("module", moduleKey), lf("bump", bump.String()),
+		lf("selected", sess.BatchReleaseCtx.SelectedCount()))
 
 	// in-place edit으로 prompt 갱신 (header + components 둘 다 새 선택 반영).
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -1108,22 +1128,33 @@ func handleBatchReleaseSelect(s *discordgo.Session, i *discordgo.InteractionCrea
 func handleBatchReleaseStart(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
 	bc := sess.BatchReleaseCtx
 	if bc == nil {
+		logGuard("release/batch", "ctx_expired", "[모두 진행] click — BatchReleaseCtx nil",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)))
 		respondInteraction(s, i, "batch release 컨텍스트가 만료되었습니다. sticky의 [릴리즈 PR 만들기] → [전체]로 다시 시작해주세요.")
 		return
 	}
 	if bc.InProgress {
+		logGuard("release/batch", "double_start", "[모두 진행] 중복 click — 이미 진행 중",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+			lf("selected", bc.SelectedCount()))
 		respondInteractionEphemeral(s, i, "이미 batch release가 진행 중입니다.")
 		return
 	}
 	if !bc.HasAnySelection() {
+		logGuard("release/batch", "no_selection", "선택 0개 — 발사 reject",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)))
 		respondInteractionEphemeral(s, i, "선택된 모듈이 0개입니다. 모듈별 dropdown에서 bump를 1개 이상 선택해주세요.")
 		return
 	}
 	if githubClient == nil {
+		logGuard("release/batch", "github_unconfigured", "GITHUB_TOKEN 미설정",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)))
 		respondInteraction(s, i, "GITHUB_TOKEN이 설정되어 있지 않아 batch release를 시작할 수 없습니다.")
 		return
 	}
 	if llmClient == nil {
+		logGuard("release/batch", "llm_unconfigured", "LLM client 미초기화",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)))
 		respondInteraction(s, i, "LLM 클라이언트가 초기화되지 않아 batch release를 시작할 수 없습니다.")
 		return
 	}
@@ -1135,8 +1166,9 @@ func handleBatchReleaseStart(s *discordgo.Session, i *discordgo.InteractionCreat
 			selected = append(selected, fmt.Sprintf("%s=%s", m.Key, b))
 		}
 	}
-	log.Printf("[릴리즈/batch] start thread=%s by=%s selected=[%s]",
-		sess.ThreadID, interactionCallerUsername(i), strings.Join(selected, ", "))
+	logEvent("release/batch", "fire", "[모두 진행] click — N goroutine 발사",
+		lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+		lf("selected", bc.SelectedCount()), lf("modules", strings.Join(selected, ",")))
 
 	respondInteraction(s, i, fmt.Sprintf("Batch release 발사 — 모듈 %d개 (%s)", bc.SelectedCount(), strings.Join(selected, ", ")))
 	go runBatchReleaseFlow(s, sess, bc)
@@ -1395,6 +1427,7 @@ func setupReleaseContextForBatch(ctx context.Context, module release.Module, bum
 //  6. BatchReleaseCtx.InProgress = false (cleanup)
 //  7. sendSticky 재발사 (A-8 일관성)
 func runBatchReleaseFlow(s *discordgo.Session, sess *Session, bc *BatchReleaseContext) {
+	startedAt := time.Now()
 	defer func() {
 		bc.InProgress = false
 		if sess.Mode == ModeMeeting {
@@ -1412,6 +1445,8 @@ func runBatchReleaseFlow(s *discordgo.Session, sess *Session, bc *BatchReleaseCo
 		jobs = append(jobs, &batchModuleJob{Module: m, Bump: bump})
 	}
 	if len(jobs) == 0 {
+		logGuard("release/batch", "no_jobs", "selection 0건 — 진행 중단",
+			lf("thread", sess.ThreadID))
 		s.ChannelMessageSend(sess.ThreadID, "선택된 모듈이 0개입니다.")
 		return
 	}
@@ -1419,9 +1454,13 @@ func runBatchReleaseFlow(s *discordgo.Session, sess *Session, bc *BatchReleaseCo
 	// 2. batchProgress 시작.
 	bp, err := newBatchProgress(s, sess.ThreadID, jobs)
 	if err != nil {
+		logError("release/batch", "progress_init_failed", "초기 progress 메시지 전송 실패 — 중단", err,
+			lf("thread", sess.ThreadID), lf("jobs", len(jobs)))
 		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("batch progress 메시지 실패 — release 진행 중단: %v", err))
 		return
 	}
+	logEvent("release/batch", "begin", "N goroutine 발사 시작",
+		lf("thread", sess.ThreadID), lf("jobs", len(jobs)))
 
 	// 3. 병렬 발사.
 	var wg sync.WaitGroup
@@ -1439,12 +1478,47 @@ func runBatchReleaseFlow(s *discordgo.Session, sess *Session, bc *BatchReleaseCo
 
 	// 5. 합본 결과 메시지.
 	sendBatchReleaseResult(s, sess, jobs)
+
+	// 6. 종료 로그 (성공/실패 카운트).
+	successCount, failCount := 0, 0
+	for _, j := range jobs {
+		if j.err != nil {
+			failCount++
+		} else {
+			successCount++
+		}
+	}
+	logEvent("release/batch", "end", "모든 goroutine 종료 + 합본 결과 송신",
+		lf("thread", sess.ThreadID), lf("jobs", len(jobs)),
+		lf("success", successCount), lf("fail", failCount),
+		lf("elapsed", time.Since(startedAt)))
 }
 
 // runOneBatchModule은 1 모듈의 setup + runReleaseSteps를 실행한다 (병렬 goroutine 본체).
 // 진행 상태는 bp.update / markDone / markError로 단일 progress 메시지에 누적.
 // SubAction lifecycle (begin/append/end)은 모듈마다 독립 — corpus에 모듈별 segment로 박제.
 func runOneBatchModule(sess *Session, idx int, j *batchModuleJob, bp *batchProgress) {
+	startedAt := time.Now()
+	logEvent("release/batch", "goroutine_start", "모듈 release 시작",
+		lf("thread", sess.ThreadID), lf("idx", idx),
+		lf("module", j.Module.Key), lf("bump", j.Bump.String()))
+	defer func() {
+		// 종료 로그 — 성공/실패 무관, elapsed/PR 정보 포함.
+		fields := []logField{
+			lf("thread", sess.ThreadID), lf("idx", idx),
+			lf("module", j.Module.Key), lf("elapsed", time.Since(startedAt)),
+		}
+		if j.err != nil {
+			fields = append(fields, lf("status", "fail"), lf("err", j.err.Error()))
+			if j.rc != nil {
+				fields = append(fields, lf("step", j.rc.LastStep))
+			}
+		} else {
+			fields = append(fields, lf("status", "ok"), lf("pr", j.prNum), lf("url", j.prURL))
+		}
+		logEvent("release/batch", "goroutine_end", "모듈 release 종료", fields...)
+	}()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
@@ -1453,6 +1527,8 @@ func runOneBatchModule(sess *Session, idx int, j *batchModuleJob, bp *batchProgr
 	if err != nil {
 		j.err = err
 		bp.markError(idx, 0, err)
+		logError("release/batch", "setup_failed", "setupReleaseContextForBatch 실패", err,
+			lf("thread", sess.ThreadID), lf("module", j.Module.Key))
 		return
 	}
 	j.rc = rc
