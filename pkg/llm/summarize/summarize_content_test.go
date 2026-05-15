@@ -1,6 +1,7 @@
 package summarize
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ func TestBuildContentExtractionUserMessage_SeparatesHumanAndContext(t *testing.T
 		"[H1] kimjuye: workspace 통합 이슈 정리",
 		"[H2] deadwhale: 큐레이션 order 확장",
 		"[H3] kimjuye: 차주 미팅까지 FE 이슈 206 체크",
-		"=== CONTEXT_NOTES (background only, NEVER action.origin) ===",
+		"=== CONTEXT_NOTES (bot/tool/external results, NEVER action.origin) ===",
 		"[C1] [tool]: 주간 리포트: 어드민 회귀 검증 추천",
 	}
 	for _, sub := range mustContain {
@@ -137,10 +138,128 @@ func TestSummarizedContentSchema_Generates(t *testing.T) {
 		t.Fatal("schema.properties 타입 mismatch")
 	}
 	expected := []string{"decisions", "done", "in_progress", "planned", "blockers",
-		"topics", "actions", "shared", "open_questions", "tags"}
+		"topics", "actions", "shared", "open_questions", "tags",
+		"weekly_reports", "release_results", "agent_responses", "external_refs"}
 	for _, name := range expected {
 		if _, ok := props[name]; !ok {
 			t.Errorf("schema.properties.%s 누락", name)
 		}
+	}
+
+	required, ok := summarizedContentSchema["required"].([]any)
+	if !ok {
+		t.Fatal("schema.required 타입 mismatch")
+	}
+	for _, name := range expected {
+		if !containsRequiredField(required, name) {
+			t.Errorf("schema.required.%s 누락", name)
+		}
+	}
+
+	botObjects := map[string][]string{
+		"weekly_reports":  {"repo", "period_days", "commit_count", "highlights"},
+		"release_results": {"module", "prev_version", "new_version", "bump_type", "pr_number", "pr_url", "highlights"},
+		"agent_responses": {"question", "highlights"},
+		"external_refs":   {"title", "highlights"},
+	}
+	for field, wantProps := range botObjects {
+		itemProps := assertStrictArrayItemSchema(t, props, field)
+		for _, name := range wantProps {
+			if _, ok := itemProps[name]; !ok {
+				t.Errorf("schema.properties.%s.items.properties.%s 누락", field, name)
+			}
+		}
+	}
+}
+
+func containsRequiredField(required []any, name string) bool {
+	for _, item := range required {
+		if item == name {
+			return true
+		}
+	}
+	return false
+}
+
+func assertStrictArrayItemSchema(t *testing.T, props map[string]any, field string) map[string]any {
+	t.Helper()
+
+	fieldSchema, ok := props[field].(map[string]any)
+	if !ok {
+		t.Fatalf("schema.properties.%s 타입 mismatch", field)
+	}
+	items, ok := fieldSchema["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema.properties.%s.items 타입 mismatch", field)
+	}
+	if got, _ := items["type"].(string); got != "object" {
+		t.Fatalf("schema.properties.%s.items.type = %q, want object", field, got)
+	}
+	if got, ok := items["additionalProperties"].(bool); !ok || got {
+		t.Fatalf("schema.properties.%s.items.additionalProperties = %v, want false", field, items["additionalProperties"])
+	}
+	itemProps, ok := items["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema.properties.%s.items.properties 타입 mismatch", field)
+	}
+	return itemProps
+}
+
+func TestSummarizedContent_BotResultFieldsRoundTripJSON(t *testing.T) {
+	in := llm.SummarizedContent{
+		WeeklyReports: []llm.WeeklyReportSummary{
+			{
+				Repo:        "opnd/chatbot-alpha-1",
+				PeriodDays:  7,
+				CommitCount: 12,
+				Highlights:  []string{"릴리즈 플로우 정리", "테스트 보강"},
+			},
+		},
+		ReleaseResults: []llm.ReleaseResultSummary{
+			{
+				Module:      "product",
+				PrevVersion: "1.1.4",
+				NewVersion:  "1.1.5",
+				BumpType:    "patch",
+				PRNumber:    42,
+				PRURL:       "https://gitea.example/opnd/product/pulls/42",
+				Highlights:  []string{"버전 bump", "릴리즈 노트 생성"},
+			},
+		},
+		AgentResponses: []llm.AgentResponseSummary{
+			{
+				Question:   "큐레이션 정렬 정책은?",
+				Highlights: []string{"order 필드 기준 정렬", "동률이면 생성일 기준"},
+			},
+		},
+		ExternalRefs: []llm.ExternalRefSummary{
+			{
+				Title:      "Vendor latency 보고서",
+				Highlights: []string{"p95 420ms", "한국 리전 지연 증가"},
+			},
+		},
+	}
+
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+
+	var out llm.SummarizedContent
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	if len(out.WeeklyReports) != 1 || out.WeeklyReports[0].Repo != "opnd/chatbot-alpha-1" {
+		t.Fatalf("weekly_reports round trip mismatch: %+v", out.WeeklyReports)
+	}
+	if len(out.ReleaseResults) != 1 || out.ReleaseResults[0].PRNumber != 42 {
+		t.Fatalf("release_results round trip mismatch: %+v", out.ReleaseResults)
+	}
+	if len(out.AgentResponses) != 1 || out.AgentResponses[0].Question != "큐레이션 정렬 정책은?" {
+		t.Fatalf("agent_responses round trip mismatch: %+v", out.AgentResponses)
+	}
+	if len(out.ExternalRefs) != 1 || out.ExternalRefs[0].Title != "Vendor latency 보고서" {
+		t.Fatalf("external_refs round trip mismatch: %+v", out.ExternalRefs)
 	}
 }

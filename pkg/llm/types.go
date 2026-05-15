@@ -183,16 +183,52 @@ type FreeformResponse struct {
 //   - role_based      → Actions를 Origin/TargetRoles 기준으로 그룹핑
 //   - freeform        → directive 적용한 LLM 재호출 (또는 Decisions+Topics+Actions 자유 합성)
 type SummarizedContent struct {
-	Decisions     []Decision      `json:"decisions"      jsonschema_description:"결정 (Title + Context). v1.4 규칙."`
-	Done          []string        `json:"done"           jsonschema_description:"완료된 작업/사실."`
-	InProgress    []string        `json:"in_progress"    jsonschema_description:"진행 중."`
-	Planned       []string        `json:"planned"        jsonschema_description:"예정/대기."`
-	Blockers      []string        `json:"blockers"       jsonschema_description:"막힘/이슈/리스크."`
-	Topics        []Topic         `json:"topics"         jsonschema_description:"논의 토픽 (Discussion 포맷용). 시간순 클러스터링."`
-	Actions       []SummaryAction `json:"actions"        jsonschema_description:"확정된 액션 아이템. cross-role(Origin role ≠ Target role) 인식. role_based 렌더는 이 배열을 그룹핑한다."`
-	Shared        []string        `json:"shared"         jsonschema_description:"역할 비귀속 공동 합의/공유사항."`
-	OpenQuestions []string        `json:"open_questions" jsonschema_description:"결정되지 않은 질문. '확인 필요' 접미사."`
-	Tags          []string        `json:"tags"           jsonschema_description:"공백 없는 단일 토큰 태그."`
+	Decisions      []Decision             `json:"decisions"       jsonschema_description:"결정 (Title + Context). v1.4 규칙."`
+	Done           []string               `json:"done"            jsonschema_description:"완료된 작업/사실."`
+	InProgress     []string               `json:"in_progress"     jsonschema_description:"진행 중."`
+	Planned        []string               `json:"planned"         jsonschema_description:"예정/대기."`
+	Blockers       []string               `json:"blockers"        jsonschema_description:"막힘/이슈/리스크."`
+	Topics         []Topic                `json:"topics"          jsonschema_description:"논의 토픽 (Discussion 포맷용). 시간순 클러스터링."`
+	Actions        []SummaryAction        `json:"actions"         jsonschema_description:"확정된 액션 아이템. cross-role(Origin role ≠ Target role) 인식. role_based 렌더는 이 배열을 그룹핑한다."`
+	WeeklyReports  []WeeklyReportSummary  `json:"weekly_reports"  jsonschema_description:"[GitHub 주간 분석] sub-action 결과 정리. ContextNotes 안의 [weekly] prefix 항목들에서 추출. 사람 발화의 결정/액션이 아니므로 Origin 부여 X."`
+	ReleaseResults []ReleaseResultSummary `json:"release_results" jsonschema_description:"[릴리즈 PR 만들기] sub-action 결과 정리. ContextNotes 안의 [release] prefix 항목들에서 추출."`
+	AgentResponses []AgentResponseSummary `json:"agent_responses" jsonschema_description:"[AI에게 질문] sub-action 결과 정리. ContextNotes 안의 [agent] prefix 항목들에서 추출."`
+	ExternalRefs   []ExternalRefSummary   `json:"external_refs"   jsonschema_description:"[외부 문서 첨부] paste 핵심 추출. Source=ExternalPaste 발화 본문에서."`
+	Shared         []string               `json:"shared"          jsonschema_description:"역할 비귀속 공동 합의/공유사항."`
+	OpenQuestions  []string               `json:"open_questions"  jsonschema_description:"결정되지 않은 질문. '확인 필요' 접미사."`
+	Tags           []string               `json:"tags"            jsonschema_description:"공백 없는 단일 토큰 태그."`
+}
+
+// WeeklyReportSummary는 [GitHub 주간 분석] 1건의 정리.
+// Highlights는 정제된 3-5 bullet (raw markdown 본문 그대로 dump 금지).
+type WeeklyReportSummary struct {
+	Repo        string   `json:"repo"         jsonschema_description:"분석 대상 레포 (owner/name 또는 name)"`
+	PeriodDays  int      `json:"period_days"  jsonschema_description:"분석 기간 (지난 N일). 모르면 0."`
+	CommitCount int      `json:"commit_count" jsonschema_description:"분석된 commit 개수. 모르면 0."`
+	Highlights  []string `json:"highlights"   jsonschema_description:"핵심 변경/이슈 3-5 bullet. 1줄 1 bullet."`
+}
+
+// ReleaseResultSummary는 [릴리즈 PR 만들기] 1건의 정리.
+type ReleaseResultSummary struct {
+	Module      string   `json:"module"       jsonschema_description:"모듈 키 (product/admin/frontend/dashboard 등)"`
+	PrevVersion string   `json:"prev_version" jsonschema_description:"이전 버전 (예: 1.1.4)"`
+	NewVersion  string   `json:"new_version"  jsonschema_description:"새 버전 (예: 1.1.5)"`
+	BumpType    string   `json:"bump_type"    jsonschema_description:"메이저/마이너/패치 또는 major/minor/patch"`
+	PRNumber    int      `json:"pr_number"    jsonschema_description:"PR 번호. 모르면 0."`
+	PRURL       string   `json:"pr_url"       jsonschema_description:"PR URL. 모르면 빈 문자열."`
+	Highlights  []string `json:"highlights"   jsonschema_description:"변경 핵심 3-5 bullet. PR body 그대로 dump 금지."`
+}
+
+// AgentResponseSummary는 [AI에게 질문] 1건의 정리.
+type AgentResponseSummary struct {
+	Question   string   `json:"question"   jsonschema_description:"사용자가 던진 질문 원문 (또는 요약)."`
+	Highlights []string `json:"highlights" jsonschema_description:"AI 응답의 핵심 3-5 bullet."`
+}
+
+// ExternalRefSummary는 [외부 문서 첨부] paste 1건의 정리.
+type ExternalRefSummary struct {
+	Title      string   `json:"title"      jsonschema_description:"LLM이 부여한 라벨 (예: 'Vendor latency 보고서'). paste 첫 줄 또는 핵심 키워드."`
+	Highlights []string `json:"highlights" jsonschema_description:"핵심 수치/관찰 3-5 bullet."`
 }
 
 // SummaryAction은 cross-role 인식을 포함한 단일 액션 아이템.
