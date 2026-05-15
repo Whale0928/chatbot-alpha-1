@@ -49,25 +49,39 @@ func TestSuperSessionStickyComponents_Row1HasFiveButtons(t *testing.T) {
 	}
 }
 
-func TestSuperSessionStickyComponents_Row2HasSessionEnd(t *testing.T) {
+func TestSuperSessionStickyComponents_Row2HasExternalAttachAndSessionEnd(t *testing.T) {
+	// Phase 3 chunk 3C — Row 2에 [외부 자료 첨부] 추가됨
 	comps := superSessionStickyComponents()
 	row2, ok := comps[1].(discordgo.ActionsRow)
 	if !ok {
 		t.Fatalf("expected ActionsRow at index 1, got %T", comps[1])
 	}
-	// Fatalf — 길이가 맞아야 다음 인덱싱이 안전.
-	if len(row2.Components) != 1 {
-		t.Fatalf("row 2 button count = %d, want 1 (세션 종료만)", len(row2.Components))
+	if len(row2.Components) != 2 {
+		t.Fatalf("row 2 button count = %d, want 2 ([외부 자료]+[세션 종료])", len(row2.Components))
 	}
-	btn, ok := row2.Components[0].(discordgo.Button)
+
+	// Position 0 — [외부 자료 첨부] (Secondary)
+	btnAttach, ok := row2.Components[0].(discordgo.Button)
 	if !ok {
-		t.Fatalf("row 2: expected Button, got %T", row2.Components[0])
+		t.Fatalf("row 2[0]: expected Button, got %T", row2.Components[0])
 	}
-	if btn.CustomID != customIDSessionEnd {
-		t.Errorf("row 2 customID = %q, want %q", btn.CustomID, customIDSessionEnd)
+	if btnAttach.CustomID != customIDExternalAttach {
+		t.Errorf("row 2[0] customID = %q, want %q", btnAttach.CustomID, customIDExternalAttach)
 	}
-	if btn.Style != discordgo.DangerButton {
-		t.Errorf("row 2 style = %v, want DangerButton (종료는 위험 색)", btn.Style)
+	if btnAttach.Style != discordgo.SecondaryButton {
+		t.Errorf("row 2[0] style = %v, want SecondaryButton", btnAttach.Style)
+	}
+
+	// Position 1 — [세션 종료] (Danger)
+	btnEnd, ok := row2.Components[1].(discordgo.Button)
+	if !ok {
+		t.Fatalf("row 2[1]: expected Button, got %T", row2.Components[1])
+	}
+	if btnEnd.CustomID != customIDSessionEnd {
+		t.Errorf("row 2[1] customID = %q, want %q", btnEnd.CustomID, customIDSessionEnd)
+	}
+	if btnEnd.Style != discordgo.DangerButton {
+		t.Errorf("row 2[1] style = %v, want DangerButton", btnEnd.Style)
 	}
 }
 
@@ -125,6 +139,7 @@ func TestSuperSessionCustomIDsAreUniqueAndDistinctFromLegacy(t *testing.T) {
 		customIDSubActionRelease,
 		customIDSubActionAgent,
 		customIDSessionEnd,
+		customIDExternalAttach,
 	}
 	seen := make(map[string]bool, len(allIDs))
 	for _, id := range allIDs {

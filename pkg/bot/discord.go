@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"chatbot-alpha-1/pkg/db"
 	"chatbot-alpha-1/pkg/llm"
 
 	"github.com/bwmarrin/discordgo"
@@ -15,6 +16,22 @@ import (
 // =====================================================================
 // 이벤트 엔트리 핸들러
 // =====================================================================
+
+// userIDFromInteraction은 InteractionCreate에서 호출자 user ID를 안전하게 추출한다.
+// per-user pending state(PendingAgentUserID/PendingExternalPasteUserID)에 사용.
+// guild는 i.Member.User.ID, DM은 i.User.ID. 둘 다 없으면 "" 반환.
+func userIDFromInteraction(i *discordgo.InteractionCreate) string {
+	if i == nil {
+		return ""
+	}
+	if i.Member != nil && i.Member.User != nil {
+		return i.Member.User.ID
+	}
+	if i.User != nil {
+		return i.User.ID
+	}
+	return ""
+}
 
 // interactionCallerUsername은 InteractionCreate에서 호출자 username을 안전하게 추출한다.
 // guild interaction은 i.Member.User에, DM interaction은 i.User에 사용자 정보가 들어감.
@@ -97,6 +114,24 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	sess.UpdatedAt = time.Now()
+
+	// === Phase 3 chunk 3C — Pending* 자동 취소 (per-user 게이트) ===
+	// pending 취소는 본인이 다른 button을 누른 경우만 — 다른 참석자가 sticky를 만져도 A의 pending이
+	// 사라지지 않게 (codex 8차 리뷰 P2). clickerUID와 pending owner가 일치할 때만 clear.
+	clickerUID := userIDFromInteraction(i)
+	if data.CustomID != customIDExternalAttach && sess.PendingExternalPasteUserID != "" &&
+		sess.PendingExternalPasteUserID == clickerUID {
+		sess.PendingExternalPasteUserID = ""
+	}
+	if data.CustomID != customIDSubActionAgent && sess.PendingAgentUserID != "" &&
+		sess.PendingAgentUserID == clickerUID {
+		// agent pending 취소 시 super-session에서는 State도 Meeting으로 복귀 — StateAgentAwaitInput
+		// 잔존 시 다음 미팅 발화가 agent로 라우팅되는 race 방어 (codex 4차 리뷰 P2).
+		if sess.Mode == ModeMeeting && sess.State == StateAgentAwaitInput {
+			sess.State = StateMeeting
+		}
+		sess.PendingAgentUserID = ""
+	}
 
 	// 동적 custom_id 처리: weekly_repo:owner/name 등 prefix 매칭은 switch case로 표현 불가하므로 먼저 분기.
 	if isWeeklyRepoCustomID(data.CustomID) {
@@ -248,11 +283,54 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		header := fmt.Sprintf("주간 분석할 레포를 선택해주세요. 결과는 이 스레드의 corpus에 누적됩니다. (등록된 레포: %d개)", len(weeklyRepos))
 		respondInteractionWithComponents(s, i, header, buildWeeklyRepoRows(weeklyRepos))
 
-	// === Phase 3 chunk 3B-2c — [릴리즈 추가]/[에이전트] 후속 ===
+	// === Phase 3 chunk 3B-2c — [릴리즈 추가] in-thread 통합 ===
+	// 기존 handleReleaseEntry 흐름 재사용 — 같은 스레드에서 라인 선택 → 모듈 → bump → 진행.
+	// runReleaseFlow가 sess.Mode==ModeMeeting 감지 시 SubAction(Release) lifecycle + 결과 corpus 누적.
+	//
+	// race 가드 (codex 6차): sess.ReleaseCtx는 단일 인스턴스 — 다중 참석자가 동시에 release 시작하면
+	// ctx 덮어쓰기 위험 (A의 confirm button이 B의 모듈로 실행). 진행 중 release가 있으면 reject.
+	//
+	// stale 처리 (codex 7차): release 완료(PRNumber>0)된 ctx는 새 release를 막지 않도록 reset.
+	// 진행 중(PRNumber=0)인 ctx만 reject — 같은 미팅에서 release 여러 번 가능.
 	case customIDSubActionRelease:
-		respondInteraction(s, i, "[릴리즈 추가]는 이 스레드 안에서 릴리즈 작업을 실행해 결과를 같은 corpus에 누적합니다. Phase 3 chunk 3B-2에서 활성화 예정입니다.")
+		log.Printf("[미팅/subaction_release] thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
+		if sess.ReleaseCtx != nil && sess.ReleaseCtx.PRNumber == 0 {
+			respondInteraction(s, i, "현재 진행 중인 릴리즈가 있습니다. 완료/취소 후 다시 시작해주세요. (race 방어 — 동시에 여러 release를 같은 스레드에서 진행 X)")
+			return
+		}
+		// 완료된 stale ReleaseCtx는 handleReleaseEntry가 새로 덮어쓸 수 있도록 reset.
+		sess.ReleaseCtx = nil
+		handleReleaseEntry(s, i, sess)
+
+	// === Phase 3 chunk 3B-2c — [에이전트] in-thread 통합 ===
+	// agent 모드 진입 (사용자 자유 자연어 지시 입력 대기). 메시지 입력 시 runAgentInstruction 호출 →
+	// SubAction(Agent) lifecycle + 결과 corpus 누적.
 	case customIDSubActionAgent:
-		respondInteraction(s, i, "[에이전트]는 이 스레드 안에서 자유 자연어 지시를 실행해 결과를 같은 corpus에 누적합니다. Phase 3 chunk 3B-2에서 활성화 예정입니다.")
+		log.Printf("[미팅/subaction_agent] thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
+		// handleAgent와 동일 가드 — GITHUB_TOKEN 미설정 시 fetchAgentContext가 nil deref panic 위험.
+		if githubClient == nil {
+			respondInteraction(s, i, "GITHUB_TOKEN이 설정되어 있지 않아 에이전트 기능을 사용할 수 없습니다.")
+			return
+		}
+		// LLM 가드 — GPT_API_KEY 누락 시 summarize.Agent에서 c.API() nil deref panic.
+		if llmClient == nil {
+			respondInteraction(s, i, "LLM 클라이언트가 초기화되지 않아 에이전트 기능을 사용할 수 없습니다.")
+			return
+		}
+		// per-user pending — 다중 참석자 회의에서 다른 사용자의 일반 발화를 agent 지시로 잘못 처리 방지.
+		// 발화 시점에 m.Author.ID와 비교해 일치하는 사람의 다음 1건 메시지만 agent 입력으로 소비.
+		sess.PendingAgentUserID = userIDFromInteraction(i)
+		sess.State = StateAgentAwaitInput
+		respondInteraction(s, i, "에이전트 모드: 자유 자연어 지시를 입력하세요 (예: \"인프라 관련 열려있는 이슈 가져와\"). 결과는 이 스레드의 corpus에 누적됩니다. (button을 누른 본인의 다음 메시지만 지시로 처리)")
+
+	// === Phase 3 chunk 3C — [외부 자료 첨부] 명시 button ===
+	// per-user pending — 다중 참석자 회의에서 다른 사용자의 발화가 잘못 ExternalPaste로 분류되는 race 방어.
+	// 클릭한 본인의 다음 1건 메시지만 ExternalPaste로 분류 + clear.
+	case customIDExternalAttach:
+		uid := userIDFromInteraction(i)
+		sess.PendingExternalPasteUserID = uid
+		log.Printf("[미팅/external_attach] 활성화 thread=%s by=%s uid=%s", sess.ThreadID, interactionCallerUsername(i), uid)
+		respondInteraction(s, i, "본인이 보내는 다음 메시지 1건을 외부 자료로 분류합니다. 회의록·외부 문서 등을 그대로 paste 해주세요. (취소: 다른 button 클릭 또는 발화 1건 후 자동 해제)")
 
 	// === Phase 3 chunk 3D — 명시 [세션 종료] button ===
 	// finalize와 분리된 명시 종료. HandleSessionEnd가 sticky 제거 + DB close + in-memory 정리.
@@ -449,6 +527,27 @@ func handleSession(s *discordgo.Session, m *discordgo.MessageCreate, sess *Sessi
 	case StateWeeklyAwaitDirective:
 		handleWeeklyAwaitDirectiveMessage(s, m, sess)
 	case StateAgentAwaitInput:
+		// === Phase 3 chunk 3C — Agent per-user 게이트 (super-session safe) ===
+		// 정책:
+		//   - PendingAgentUserID와 m.Author.ID 일치 → 본인 발화, agent 지시로 소비
+		//   - 다른 사용자 발화 → super-session이면 미팅 노트로 우회, 그렇지 않으면 (legacy) 그대로 agent
+		//
+		// 추가 race 방어 (codex 5차): super-session에서 agent 호출 직전에 State를 StateMeeting으로
+		// 복귀시키고 PendingAgentUserID clear. runAgentInstruction은 30~90초 long-running이라 그 동안
+		// 도착하는 다른 발화가 StateAgentAwaitInput 상태에서 agent로 잘못 라우팅되는 것 방지.
+		if sess.PendingAgentUserID != "" && sess.PendingAgentUserID != m.Author.ID {
+			if sess.Mode == ModeMeeting {
+				handleMeetingMessage(s, m, sess)
+				return
+			}
+			// 미팅 모드 아닌 legacy는 그대로 agent (이 분기 자체가 super-session 가정 외)
+		}
+		// 본인 발화 또는 legacy — agent 지시로 소비.
+		// super-session: long-running agent 호출 동안 다른 발화 race 차단을 위해 미리 StateMeeting 복귀.
+		if sess.Mode == ModeMeeting {
+			sess.State = StateMeeting
+		}
+		sess.PendingAgentUserID = ""
 		handleAgentMessage(s, m, sess)
 	}
 }
@@ -486,14 +585,40 @@ func handleMeetingMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess
 	sess.UpdatedAt = time.Now()
 
 	if IsMeetingEndCommand(content) {
+		// "미팅 종료" command는 paste flag 소비 안 하므로 명시 clear (codex 6차 P2).
+		// 안 하면 finalize 후 같은 스레드 재사용 케이스에서 다음 일반 발화가 잘못 ExternalPaste로 분류.
+		sess.PendingExternalPasteUserID = ""
 		handleMeetingEnd(s, m, sess)
 		return
 	}
 
 	// === Phase 1 — Source 자동 분류 + role snapshot + DB persist ===
 	// 거시 디자인 결정 F(자동) + 결정 6(Source 라벨로 환각 방어).
-	source := classifyMessageSource(content)
+	// === Phase 3 chunk 3C — 명시 분류 우선 적용 (per-user) ===
+	// PendingExternalPasteUserID가 m.Author.ID와 일치할 때만 ExternalPaste 강제.
+	// 다중 참석자 회의에서 다른 사용자 발화가 잘못 분류되는 race 방어. 1회성 — 사용 후 clear.
+	var source db.NoteSource
+	if sess.PendingExternalPasteUserID != "" && sess.PendingExternalPasteUserID == m.Author.ID {
+		source = db.SourceExternalPaste
+		sess.PendingExternalPasteUserID = ""
+		log.Printf("[미팅/external_attach] 명시 분류 적용 thread=%s by=%s runes=%d",
+			sess.ThreadID, m.Author.Username, len([]rune(content)))
+	} else {
+		source = classifyMessageSource(content)
+	}
 	authorRoles := sess.GetOrFetchRoles(s, m.Author.ID)
+
+	// === Phase 4 — cross-role 키워드 detect (best-effort, log만) ===
+	// 발화 시점에 키워드 매칭으로 임시 라벨링 — 정리본 추출 시 LLM이 최종 확정.
+	// 채팅마다 LLM 호출 X (결정 7). 단순 substring 매칭으로 80% 케이스 잡음.
+	var detectedTargets []string
+	if source == db.SourceHuman {
+		detectedTargets = DetectTargetRoles(content)
+		if len(detectedTargets) > 0 && IsCrossRoleHint(authorRoles, detectedTargets) {
+			log.Printf("[미팅/cross-role] detected thread=%s author=%s origin_roles=%v target_roles=%v",
+				sess.ThreadID, m.Author.Username, authorRoles, detectedTargets)
+		}
+	}
 
 	note := Note{
 		Author:      m.Author.Username,
@@ -506,8 +631,8 @@ func handleMeetingMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess
 	// stored는 정규화 적용된 노트 사본 (Timestamp 등 채워진 상태). 락 밖에서 안전하게 persist.
 	persistNote(context.Background(), sess, stored)
 
-	log.Printf("[미팅/note] thread=%s idx=%d author=%s roles=%v source=%s runes=%d content=%q",
-		sess.ThreadID, idx, m.Author.Username, authorRoles, source,
+	log.Printf("[미팅/note] thread=%s idx=%d author=%s roles=%v source=%s targets=%v runes=%d content=%q",
+		sess.ThreadID, idx, m.Author.Username, authorRoles, source, detectedTargets,
 		len([]rune(content)), truncate(content, 80))
 
 	// Sticky 컨트롤 메시지 threshold 체크: N개마다 [중간 요약][미팅 종료] 버튼을 최신 하단으로 재전송.

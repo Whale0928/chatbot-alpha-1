@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"chatbot-alpha-1/pkg/db"
 	"chatbot-alpha-1/pkg/github"
 	"chatbot-alpha-1/pkg/llm/render"
 	"chatbot-alpha-1/pkg/llm/summarize"
@@ -345,6 +346,33 @@ func runReleaseFlow(s *discordgo.Session, sess *Session, rc *ReleaseContext) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
+	// === Phase 3 chunk 3B-2c — super-session in-thread 통합 ===
+	// weekly/agent와 동일 패턴. ModeMeeting일 때만 SubAction lifecycle.
+	// Context 분리 (begin/end/append 각 5s 독립) — runReleaseFlow는 180s timeout이라
+	// 단일 ctx 공유 시 defer 시점에 cancelled 위험.
+	var (
+		sa             *SubActionContext
+		releaseSummary string // PR 생성 성공 시 채워짐 — defer/AppendResult capture
+	)
+	if sess.Mode == ModeMeeting {
+		beginCtx, beginCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sa = BeginSubAction(beginCtx, sess, db.SegmentRelease)
+		beginCancel()
+		defer func() {
+			endCtx, endCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer endCancel()
+			sa.EndWithArtifact(endCtx, map[string]any{
+				"module":      rc.Module.Key,
+				"prev_tag":    rc.PrevTag,
+				"new_version": rc.NewVersion.String(),
+				"bump":        rc.Bump.String(),
+				"pr_number":   rc.PRNumber, // 0이면 PR 생성 전 종료
+				"pr_url":      rc.PRURL,
+				"summary":     len(releaseSummary), // 0이면 에러 종료
+			})
+		}()
+	}
+
 	updateProgress := func(step int, note string) {
 		rc.LastStep = step
 		_, err := s.ChannelMessageEditComplex(&discordgo.MessageEdit{
@@ -494,6 +522,17 @@ func runReleaseFlow(s *discordgo.Session, sess *Session, rc *ReleaseContext) {
 		log.Printf("[릴리즈/progress] 완료 edit 실패: %v", err)
 	}
 	sendReleaseResult(s, sess, rc, prBody)
+
+	// === super-session corpus 누적 ===
+	// PR 본문(markdown) + URL/Number를 NoteSource=ReleaseResult로 sess에 추가.
+	// finalize 시 ContextNotes로 분류되어 LLM에 참고 자료로 전달, attribution 후보 X.
+	releaseSummary = fmt.Sprintf("[release] %s %s → PR #%d (%s)\n%s",
+		rc.Module.DisplayName, rc.NewVersion.String(), rc.PRNumber, rc.PRURL, prBody)
+	if sa != nil {
+		appendCtx, appendCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sa.AppendResult(appendCtx, sess, "[release]", db.SourceReleaseResult, releaseSummary)
+		appendCancel()
+	}
 
 	// 폴링 시작 — 별도 goroutine. context cancel 로 [폴링 중단] 처리.
 	pollCtx, cancel := context.WithCancel(context.Background())

@@ -71,6 +71,16 @@ type Session struct {
 	// HandleSessionEnd 안내, 후속 분석 등에서 "세션이 얼마나 오래 진행됐는지" 정확히 표시.
 	StartedAt time.Time
 
+	// PendingExternalPasteUserID: 사용자가 [외부 자료 첨부] button을 누른 사용자의 Discord ID.
+	// 빈 문자열 = pending 없음. 다중 참석자 super-session에서 A가 button 누르고 B가 먼저 발화하면
+	// B의 발화가 잘못 ExternalPaste로 분류되는 회귀 방어 — m.Author.ID == 이 ID일 때만 소비 + clear.
+	PendingExternalPasteUserID string
+
+	// PendingAgentUserID: [에이전트] button을 누른 사용자의 Discord ID.
+	// StateAgentAwaitInput으로 세션 전역 전환은 multi-user 회의에서 다른 사용자 발화를 agent 지시로
+	// 잘못 처리하는 race가 발생 — 이 ID와 m.Author.ID가 일치하는 메시지만 agent 입력으로 소비.
+	PendingAgentUserID string
+
 	// NoteFormat은 미팅 종료 시 생성할 노트 포맷.
 	// 미팅 시작 시 default(FormatDecisionStatus). 사용자가 종료 시 4 버튼 중
 	// 하나를 선택하기 직전까지의 잠정값. 실제 finalize는 인자로 명시 전달.

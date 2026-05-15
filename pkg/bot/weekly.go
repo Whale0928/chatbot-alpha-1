@@ -838,6 +838,21 @@ func handleWeeklyCloseConfirm(s *discordgo.Session, i *discordgo.InteractionCrea
 
 // handleHome는 [처음 메뉴] 클릭 시 세션을 SelectMode로 reset하고 초기 메뉴를 다시 노출한다.
 func handleHome(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
+	// === Phase 3 — super-session 보존 가드 ===
+	// 미팅 모드(super-session) 진행 중에 [처음 메뉴] 누르면 corpus(Notes)가 통째로 날아가는
+	// destructive reset 발생. super-session에서는 미팅 종료가 명시 [세션 종료] button — Home button은
+	// no-op + 안내로 처리해 corpus 보존.
+	//
+	// 단, 진행 중 release ctx는 Home click을 cancel signal로 간주해 정리 (codex 8차 P2) —
+	// 사용자가 release UI에서 [처음 메뉴] 누르면 진행 중 release를 포기한 것이라 ReleaseCtx 비워서
+	// 다음 [릴리즈 추가] guard가 정상 진입하도록.
+	if sess.Mode == ModeMeeting {
+		if sess.ReleaseCtx != nil && sess.ReleaseCtx.PRNumber == 0 {
+			sess.ReleaseCtx = nil
+		}
+		respondInteraction(s, i, "super-session 진행 중입니다. 종료하려면 sticky의 [세션 종료] button을 사용해주세요. (대화는 계속 corpus에 누적됩니다.)")
+		return
+	}
 	sess.Mode = ModeNormal
 	sess.State = StateSelectMode
 	sess.Notes = nil

@@ -313,6 +313,11 @@ const (
 	customIDFormatToggleFreeform       = "format_toggle_freeform"
 )
 
+// customIDExternalAttach — Phase 3 chunk 3C: 외부 자료 첨부 명시 button.
+// 클릭 시 sess.PendingExternalPaste=true → 다음 1건 발화를 ExternalPaste source로 분류.
+// 거시 결정 F의 명시적 분류 부분 (자동 500자 임계와 짝).
+const customIDExternalAttach = "external_attach"
+
 // customIDSuperSession* — Phase 3 super-session sticky button.
 //
 // 거시 디자인 결정 1 핵심 — 같은 스레드에서 sub-action을 호출해 컨텍스트 유지.
@@ -451,6 +456,7 @@ func superSessionStickyComponents() []discordgo.MessageComponent {
 		},
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
+				discordgo.Button{Label: "외부 자료 첨부", Style: discordgo.SecondaryButton, CustomID: customIDExternalAttach},
 				discordgo.Button{Label: "세션 종료", Style: discordgo.DangerButton, CustomID: customIDSessionEnd},
 			},
 		},

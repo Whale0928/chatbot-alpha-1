@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"chatbot-alpha-1/pkg/db"
 	"chatbot-alpha-1/pkg/github"
 	"chatbot-alpha-1/pkg/llm/summarize"
 
@@ -63,11 +64,18 @@ func handleAgentMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess *
 		return
 	}
 	if content == "취소" {
-		sess.State = StateSelectMode
-		s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
-			Content:    "에이전트를 종료했습니다.",
-			Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}}},
-		})
+		// super-session(미팅 모드)에서 cancel — StateMeeting 유지해 후속 발화를 corpus에 계속 누적.
+		// legacy 흐름은 SelectMode로 복귀하고 [처음 메뉴] 노출.
+		if sess.Mode == ModeMeeting {
+			sess.State = StateMeeting
+			s.ChannelMessageSend(m.ChannelID, "에이전트 입력을 취소했습니다. 미팅이 계속 진행 중입니다 (메시지를 자유롭게 입력하세요).")
+		} else {
+			sess.State = StateSelectMode
+			s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
+				Content:    "에이전트를 종료했습니다.",
+				Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}}},
+			})
+		}
 		return
 	}
 	runAgentInstruction(s, sess, content, m.Author.Username)
@@ -88,6 +96,29 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 	log.Printf("[agent/request] thread=%s by=%s runes=%d preview=%q",
 		sess.ThreadID, authorName, len([]rune(content)), truncate(content, 80))
 
+	// === Phase 3 chunk 3B-2c — super-session in-thread 통합 ===
+	// weekly와 동일 패턴 (runWeeklyAnalyze 참고). ModeMeeting일 때만 SubAction lifecycle.
+	// Context 분리: begin 5s / end 5s / append 5s — runAgentInstruction은 GH fetch + LLM(120s+)이라
+	// 단일 ctx로는 항상 cancelled 상태에서 종료.
+	var (
+		sa            *SubActionContext
+		renderedFinal string
+	)
+	if sess.Mode == ModeMeeting {
+		beginCtx, beginCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sa = BeginSubAction(beginCtx, sess, db.SegmentAgent)
+		beginCancel()
+		defer func() {
+			endCtx, endCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer endCancel()
+			sa.EndWithArtifact(endCtx, map[string]any{
+				"directive_runes": len([]rune(content)),
+				"author":          authorName,
+				"rendered_runes":  len([]rune(renderedFinal)),
+			})
+		}()
+	}
+
 	s.ChannelMessageSend(sess.ThreadID, "데이터 수집 중...")
 
 	ghCtx, ghCancel := context.WithTimeout(context.Background(), agentGitHubTimeout)
@@ -96,7 +127,13 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 	if err != nil {
 		log.Printf("[agent/fetch] ERR: %v", err)
 		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("데이터 수집 실패: %v", err))
-		sess.State = StateSelectMode
+		// 미팅 모드(super-session)에서 Agent를 호출한 경우 StateMeeting 유지 — 후속 발화가 corpus에
+		// 계속 누적되어야 함. legacy(ModeNormal) 흐름은 SelectMode로 복귀.
+		if sess.Mode == ModeMeeting {
+			sess.State = StateMeeting
+		} else {
+			sess.State = StateSelectMode
+		}
 		return
 	}
 	totalIssues, totalCommits := 0, 0
@@ -116,7 +153,13 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 	if err != nil {
 		log.Printf("[agent/llm] ERR elapsed=%s err=%v", dur, err)
 		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("LLM 분석 실패: %v", err))
-		sess.State = StateSelectMode
+		// 미팅 모드(super-session)에서 Agent를 호출한 경우 StateMeeting 유지 — 후속 발화가 corpus에
+		// 계속 누적되어야 함. legacy(ModeNormal) 흐름은 SelectMode로 복귀.
+		if sess.Mode == ModeMeeting {
+			sess.State = StateMeeting
+		} else {
+			sess.State = StateSelectMode
+		}
 		return
 	}
 	log.Printf("[agent/llm] ok elapsed=%s markdown_runes=%d", dur, len([]rune(resp.Markdown)))
@@ -125,8 +168,17 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 	if rendered == "" {
 		rendered = "_(답변 본문이 비어있습니다)_"
 	}
-	if err := sendLongMessage(s, sess.ThreadID, rendered); err != nil {
-		log.Printf("[agent/send] ERR: %v", err)
+	sendErr := sendLongMessage(s, sess.ThreadID, rendered)
+	if sendErr != nil {
+		log.Printf("[agent/send] ERR (corpus 미누적): %v", sendErr)
+	}
+
+	// super-session corpus 누적 — 전송 성공 시에만 (사용자 미수신 분석이 정리본에 영향 X).
+	renderedFinal = rendered
+	if sa != nil && sendErr == nil {
+		appendCtx, appendCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sa.AppendResult(appendCtx, sess, "[agent]", db.SourceAgentOutput, rendered)
+		appendCancel()
 	}
 	if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
 		Content: "이어서 다른 작업을 시작하려면 [처음 메뉴]를 눌러주세요.",
@@ -136,7 +188,12 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 	}); err != nil {
 		log.Printf("[agent/send] ERR home button: %v", err)
 	}
-	sess.State = StateSelectMode
+	// 미팅 모드에서는 후속 발화가 corpus에 계속 누적되어야 하므로 StateMeeting 유지.
+	if sess.Mode == ModeMeeting {
+		sess.State = StateMeeting
+	} else {
+		sess.State = StateSelectMode
+	}
 }
 
 // fetchAgentContext는 등록된 weeklyRepos 4개를 병렬로 fetch해 AgentRepoContext slice로 반환한다.
