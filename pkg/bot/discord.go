@@ -194,6 +194,12 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			// 성공: 세션을 정리하지 않고 SelectMode로 reset해서 사용자가 같은 스레드에서
 			// [처음 메뉴]로 다음 작업을 이어갈 수 있게 한다.
 			log.Printf("[미팅/end] 세션 reset (SelectMode) thread=%s", sess.ThreadID)
+			// === Phase 1: DB 세션 CLOSE ===
+			// 현재 모델에서 finalize 성공 = 미팅 종료. DB sessions row를 CLOSED로 전환하고
+			// in-memory 세션은 SelectMode로 reset해 다음 작업 진입 시 새 DB 세션을 시작한다.
+			// (Phase 3 super-session 모델에서는 finalize가 종료가 아니라 도구 호출이 되므로 재검토 필요.)
+			persistSessionClose(context.Background(), sess)
+			sess.DBSessionID = ""
 			sess.Mode = ModeNormal
 			sess.State = StateSelectMode
 			sess.Notes = nil
@@ -203,6 +209,47 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			sess.Directive = ""
 		} else {
 			log.Printf("[미팅/end] 세션 보존 (재시도 대기) thread=%s", sess.ThreadID)
+		}
+
+	// === Phase 2 chunk 3c — 정리본 메시지의 4 포맷 토글 button ===
+	// DB에서 SummarizedContent 조회 → 새 포맷 렌더 → 메시지 edit. LLM 재호출 없음.
+	case customIDFormatToggleDecisionStatus,
+		customIDFormatToggleDiscussion,
+		customIDFormatToggleRoleBased,
+		customIDFormatToggleFreeform:
+		log.Printf("[미팅/format_toggle] 클릭 thread=%s customID=%s by=%s", sess.ThreadID, data.CustomID, i.Member.User.Username)
+		// 즉시 ack (defer 응답) — 토글은 UX상 매우 빠름 (DB read + render 순수)
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		}); err != nil {
+			log.Printf("[미팅/format_toggle] ERR ack 실패: %v", err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		HandleFormatToggle(ctx, s, i, sess, data.CustomID)
+
+	// === Phase 2 chunk 3b — [정리본 통합·토글] 버튼 → SummarizedContent 1회 추출 ===
+	// LLM 1회 호출 후 default(decision_status)로 렌더 + 4 포맷 토글 button row 첨부.
+	case customIDFinalizeSummarized:
+		log.Printf("[미팅/finalize_summarized] 클릭 thread=%s by=%s", sess.ThreadID, i.Member.User.Username)
+		respondInteraction(s, i, "정리본을 추출하는 중입니다...")
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		keep := FinalizeSummarized(ctx, s, summarizer, sess, time.Now())
+		if !keep {
+			log.Printf("[미팅/finalize_summarized] 세션 reset thread=%s", sess.ThreadID)
+			persistSessionClose(context.Background(), sess)
+			sess.DBSessionID = ""
+			sess.Mode = ModeNormal
+			sess.State = StateSelectMode
+			sess.Notes = nil
+			sess.Speakers = nil
+			sess.NotesAtLastSticky = 0
+			sess.StickyMessageID = ""
+			sess.Directive = ""
+		} else {
+			log.Printf("[미팅/finalize_summarized] 세션 보존 (재시도 대기) thread=%s", sess.ThreadID)
 		}
 
 	// [추가 요청] 버튼 → 사용자 정리 지시 입력 대기 상태로 전환
@@ -307,11 +354,15 @@ func openThread(s *discordgo.Session, m *discordgo.MessageCreate, content string
 		State:     StateSelectMode,
 		ThreadID:  thread.ID,
 		UserID:    m.Author.ID,
+		GuildID:   m.GuildID,
 		UpdatedAt: time.Now(),
 	}
 	sessionsMu.Lock()
 	sessions[thread.ID] = sess
 	sessionsMu.Unlock()
+
+	// DB 영속화 (best-effort) — 실패해도 in-memory로 진행.
+	persistSessionStart(context.Background(), sess)
 
 	s.ChannelMessageSendComplex(thread.ID, &discordgo.MessageSend{
 		Content: "무엇을 도와드릴까요?",
@@ -385,10 +436,25 @@ func handleMeetingMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess
 		return
 	}
 
-	// 조용히 수집 (Author 포함)
-	idx := sess.AddNote(m.Author.Username, content)
-	log.Printf("[미팅/note] thread=%s idx=%d author=%s runes=%d content=%q",
-		sess.ThreadID, idx, m.Author.Username, len([]rune(content)), truncate(content, 80))
+	// === Phase 1 — Source 자동 분류 + role snapshot + DB persist ===
+	// 거시 디자인 결정 F(자동) + 결정 6(Source 라벨로 환각 방어).
+	source := classifyMessageSource(content)
+	authorRoles := sess.GetOrFetchRoles(s, m.Author.ID)
+
+	note := Note{
+		Author:      m.Author.Username,
+		Content:     content,
+		AuthorID:    m.Author.ID,
+		AuthorRoles: authorRoles,
+		Source:      source,
+	}
+	idx, stored := sess.AddNoteWithMeta(note)
+	// stored는 정규화 적용된 노트 사본 (Timestamp 등 채워진 상태). 락 밖에서 안전하게 persist.
+	persistNote(context.Background(), sess, stored)
+
+	log.Printf("[미팅/note] thread=%s idx=%d author=%s roles=%v source=%s runes=%d content=%q",
+		sess.ThreadID, idx, m.Author.Username, authorRoles, source,
+		len([]rune(content)), truncate(content, 80))
 
 	// Sticky 컨트롤 메시지 threshold 체크: N개마다 [중간 요약][미팅 종료] 버튼을 최신 하단으로 재전송.
 	maybeRefreshSticky(s, sess)

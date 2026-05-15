@@ -39,3 +39,9 @@ func (a llmSummarizer) SummarizeFreeform(ctx context.Context, notes []llm.Note, 
 func (a llmSummarizer) SummarizeInterim(ctx context.Context, notes []llm.Note, speakers []string, date time.Time) (*llm.InterimNoteResponse, error) {
 	return summarize.Interim(ctx, a.c, notes, speakers, date)
 }
+
+// ExtractContent는 Phase 2 정리본 1회 추출의 어댑터 메서드.
+// summarize.ExtractContent 직접 위임 — pkg/bot/handler.go의 MeetingSummarizer 인터페이스 구현.
+func (a llmSummarizer) ExtractContent(ctx context.Context, in summarize.ContentExtractionInput) (*llm.SummarizedContent, error) {
+	return summarize.ExtractContent(ctx, a.c, in)
+}

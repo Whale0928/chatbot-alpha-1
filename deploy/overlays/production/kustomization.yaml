@@ -5,6 +5,7 @@ namespace: chatbot-alpha-1
 
 resources:
 - resources.yaml
+- pvc.yaml
 - deployment.yaml
 
 generators:

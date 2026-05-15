@@ -4,31 +4,72 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"chatbot-alpha-1/pkg/db"
 )
 
 // Note는 미팅 중 수집되는 단일 메모. Author는 Discord 발화자 username.
+//
+// Phase 1 추가 필드 (모두 optional, default 시 Source=Human):
+//   - AuthorID:    Discord user snowflake (DB persist 시 author_id 컬럼)
+//   - AuthorRoles: 발화 시점 guild role snapshot (예: ["BACKEND", "PM"])
+//   - Source:      Human / WeeklyDump / ReleaseResult / AgentOutput / InterimSummary / ExternalPaste
+//   - SegmentID:   sub-action 결과물이면 해당 segment id, 자유 발화면 ""
+//
+// 기존 호출자(AddNote(author, content))는 자동으로 Source=Human, AuthorRoles=nil로 처리된다.
 type Note struct {
-	Author    string
-	Content   string
-	Timestamp time.Time
+	Author      string
+	Content     string
+	Timestamp   time.Time
+	AuthorID    string
+	AuthorRoles []string
+	Source      db.NoteSource
+	SegmentID   string
 }
 
-// AddNote는 세션에 새 메모를 추가하고 발화자를 집합에 등록한다.
+// AddNote는 사람 발화 기본 케이스 (Source=Human, AuthorRoles 미설정).
+// Discord 메시지 핸들러에서 가장 흔하게 호출된다.
 // 세션 내부 mutex로 보호되므로 여러 goroutine에서 동시 호출해도 안전하다.
 // 반환값은 추가 후 전체 노트 개수 (1-based로 쓰기 편하도록 새 노트의 idx).
 func (s *Session) AddNote(author, content string) int {
+	idx, _ := s.AddNoteWithMeta(Note{
+		Author:  author,
+		Content: content,
+		Source:  db.SourceHuman,
+	})
+	return idx
+}
+
+// AddNoteWithMeta는 명시적 Source/AuthorID/AuthorRoles/SegmentID와 함께 노트를 추가한다.
+// 외부 paste 자동 분류, 도구 결과(WeeklyDump 등) persist, role snapshot 적용 시 사용.
+//
+// 동작:
+//   - Timestamp가 zero면 time.Now()로 설정
+//   - Source가 비어 있으면 db.SourceHuman으로 default
+//   - Speakers 집합에 Author 추가 (모든 source — Human이 아니더라도 발화자 집합 추적)
+//
+// 반환:
+//   - int: 추가 후 전체 노트 개수 (1-based 새 노트 idx)
+//   - Note: 정규화 적용된 노트 사본. 호출자가 후속 persist에 그대로 전달 가능
+//     (락 밖에서 sess.Notes[len-1]을 다시 읽으면 다른 goroutine이 추가한 노트를
+//     집을 수 있으므로, 호출자는 반드시 이 반환값을 사용해야 함).
+func (s *Session) AddNoteWithMeta(n Note) (int, Note) {
 	s.NotesMu.Lock()
 	defer s.NotesMu.Unlock()
-	s.Notes = append(s.Notes, Note{
-		Author:    author,
-		Content:   content,
-		Timestamp: time.Now(),
-	})
+	if n.Timestamp.IsZero() {
+		n.Timestamp = time.Now()
+	}
+	if n.Source == "" {
+		n.Source = db.SourceHuman
+	}
+	s.Notes = append(s.Notes, n)
 	if s.Speakers == nil {
 		s.Speakers = make(map[string]bool)
 	}
-	s.Speakers[author] = true
-	return len(s.Notes)
+	if n.Author != "" {
+		s.Speakers[n.Author] = true
+	}
+	return len(s.Notes), n
 }
 
 // SnapshotNotes는 현재까지 수집된 메모의 복사본을 반환한다.
@@ -41,6 +82,8 @@ func (s *Session) SnapshotNotes() []Note {
 }
 
 // SortedSpeakers는 발화자 username을 정렬된 slice로 반환한다.
+// 모든 source 발화자 포함 — 발화자 집합 자체는 도구 출력/외부 paste author까지 추적한다.
+// finalize/interim 입력으로는 SortedHumanSpeakers 사용 권장 (attribution 게이트).
 func (s *Session) SortedSpeakers() []string {
 	s.NotesMu.Lock()
 	defer s.NotesMu.Unlock()
@@ -49,6 +92,45 @@ func (s *Session) SortedSpeakers() []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// SortedHumanSpeakers는 Source=Human으로 발화한 사람만 정렬해 반환한다.
+// validate의 attribution 후보 게이트 — 거시 디자인 원칙 02:
+// "발화·도구결과·외부dump가 corpus에 같이 살되, attribution은 라벨로 차별".
+//
+// 한 사람이 Human 발화 + 외부 paste 둘 다 했으면 등장 (Human이 1번이라도 있으면).
+// WeeklyDump/ReleaseResult/AgentOutput/InterimSummary/ExternalPaste만 한 author는 제외.
+func (s *Session) SortedHumanSpeakers() []string {
+	s.NotesMu.Lock()
+	defer s.NotesMu.Unlock()
+	seen := make(map[string]bool, len(s.Speakers))
+	for _, n := range s.Notes {
+		if n.Source.IsAttributionCandidate() && n.Author != "" {
+			seen[n.Author] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SnapshotNotesForCorpus는 finalize/interim 입력용 노트 사본을 반환한다.
+// Source.IsInCorpus()=false인 항목(현재는 InterimSummary)을 제외 — 자기 재흡수 방지.
+//
+// 일반 SnapshotNotes는 모든 source 포함 (UI 표시용·로깅용).
+func (s *Session) SnapshotNotesForCorpus() []Note {
+	s.NotesMu.Lock()
+	defer s.NotesMu.Unlock()
+	out := make([]Note, 0, len(s.Notes))
+	for _, n := range s.Notes {
+		if n.Source.IsInCorpus() {
+			out = append(out, n)
+		}
+	}
 	return out
 }
 

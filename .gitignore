@@ -19,6 +19,16 @@ vendor/
 .idea/
 .vscode/
 
+# Claude Code 로컬 편의 파일 (launch.json 등 — dev 환경별로 다름)
+.claude/
+
+# 로컬 SQLite 데이터 (docker-compose volume과 별개로, 호스트에서 직접 띄울 때)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # OS
 .DS_Store
 
