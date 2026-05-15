@@ -313,6 +313,23 @@ const (
 	customIDFormatToggleFreeform       = "format_toggle_freeform"
 )
 
+// customIDSuperSession* — Phase 3 super-session sticky button.
+//
+// 거시 디자인 결정 1 핵심 — 같은 스레드에서 sub-action을 호출해 컨텍스트 유지.
+// 기존 [주간 정리]/[릴리즈]/[에이전트]는 메인 채널에서 새 스레드를 열지만, 새 sub-action button은
+// 미팅 스레드 안에서 in-place 실행되어 결과가 같은 corpus에 segment로 누적된다.
+//
+// 현재 상태:
+//   - sub-action button (weekly/release/agent): discord.go에 stub 라우팅 존재, 안내 메시지만 응답.
+//     in-thread 실행은 chunk 3B-2b/c 후속.
+//   - session_end button: discord.go가 HandleSessionEnd 호출 — 명시 종료 본격 동작 (chunk 3D 완료).
+const (
+	customIDSubActionWeekly  = "subaction_weekly"  // [주간 추가]
+	customIDSubActionRelease = "subaction_release" // [릴리즈 추가]
+	customIDSubActionAgent   = "subaction_agent"   // [에이전트]
+	customIDSessionEnd       = "session_end"       // [세션 종료] — finalize와 분리된 명시 종료
+)
+
 // customIDDirectiveBtn은 미팅 종료 prompt의 "추가 요청" 버튼 custom_id.
 // 클릭 시 사용자가 다음 채팅 메시지로 정리 지시를 입력할 수 있는 상태로 전환한다.
 const customIDDirectiveBtn = "directive_btn"
@@ -408,14 +425,56 @@ func interimControlComponents() []discordgo.MessageComponent {
 // 이 값을 낮추면 사용성은 좋지만 API 호출 부담이 늘고, 높이면 반대.
 const stickyRefreshThreshold = 3
 
-// buildStickyMessageSend는 sticky 컨트롤 메시지 payload를 생성한다.
-// "미팅 진행 중 · 메모 N건 수집됨" 본문 + [중간 요약][미팅 종료] 버튼.
-// 정보형 컨텐츠로 사용자가 봇이 살아있고 몇 개 메모가 수집됐는지 확인 가능.
-func buildStickyMessageSend(noteCount int) *discordgo.MessageSend {
-	return &discordgo.MessageSend{
-		Content:    fmt.Sprintf("`미팅 진행 중` · 메모 **%d건** 수집됨", noteCount),
-		Components: interimControlComponents(),
+// superSessionStickyComponents는 Phase 3 super-session sticky의 6 button 행을 만든다.
+//
+// 레이아웃 (Discord row 1당 max 5 button):
+//
+//	Row 1: [중간 요약] [주간 추가] [릴리즈 추가] [에이전트] [노트 정리(통합)]
+//	Row 2: [세션 종료]
+//
+// 사용자가 가장 자주 누르는 button을 위에 배치 (정리본/요약). 종료는 뚜렷이 분리.
+//
+// 핸들러:
+//   - 중간 요약 / 노트 정리: 기존 customIDInterimBtn / customIDFinalizeSummarized 재사용
+//   - 주간/릴리즈/에이전트: chunk 3B에서 in-thread sub-action 핸들러 추가 예정 (현재는 안내 stub)
+//   - 세션 종료: chunk 3D에서 finalize와 분리된 명시 종료 핸들러 (현재는 안내 stub)
+func superSessionStickyComponents() []discordgo.MessageComponent {
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{Label: "중간 요약", Style: discordgo.PrimaryButton, CustomID: customIDInterimBtn},
+				discordgo.Button{Label: "주간 추가", Style: discordgo.SecondaryButton, CustomID: customIDSubActionWeekly},
+				discordgo.Button{Label: "릴리즈 추가", Style: discordgo.SecondaryButton, CustomID: customIDSubActionRelease},
+				discordgo.Button{Label: "에이전트", Style: discordgo.SecondaryButton, CustomID: customIDSubActionAgent},
+				discordgo.Button{Label: "노트 정리", Style: discordgo.SuccessButton, CustomID: customIDFinalizeSummarized},
+			},
+		},
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{Label: "세션 종료", Style: discordgo.DangerButton, CustomID: customIDSessionEnd},
+			},
+		},
 	}
+}
+
+// buildSuperSessionStickyMessageSend는 Phase 3 sticky payload를 생성한다.
+// 본문: "super-session 진행 중 · 메모 N건". 6 button 첨부.
+func buildSuperSessionStickyMessageSend(noteCount int) *discordgo.MessageSend {
+	return &discordgo.MessageSend{
+		Content:    fmt.Sprintf("`super-session 진행 중` · 메모 **%d건** · sub-action은 같은 스레드에 누적됩니다", noteCount),
+		Components: superSessionStickyComponents(),
+	}
+}
+
+// buildStickyMessageSend는 sticky 컨트롤 메시지 payload를 생성한다.
+//
+// Phase 3 chunk 3B-1: super-session 6 button sticky로 교체.
+// 기존 [중간 요약][미팅 종료] 2 button은 interim 결과 메시지에서만 사용 (interimControlComponents).
+//
+// 사용자가 미팅 모드 진입 / 노트 누적 threshold 도달 시 이 sticky가 스레드 하단에 표시되어
+// 6 button 모두 즉시 접근 가능 — sub-action(주간/릴리즈/에이전트)도 같은 스레드 안에서 호출.
+func buildStickyMessageSend(noteCount int) *discordgo.MessageSend {
+	return buildSuperSessionStickyMessageSend(noteCount)
 }
 
 // sendSticky는 현재 sticky 메시지를 삭제하고 최신 위치에 새로 전송한다.

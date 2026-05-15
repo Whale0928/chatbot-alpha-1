@@ -66,6 +66,11 @@ type Session struct {
 	DBSessionID   string
 	RolesSnapshot map[string][]string
 
+	// === Phase 3 추가 ===
+	// StartedAt: 세션 생성 시점. UpdatedAt(마지막 활동)과 분리되어 lifecycle 경과 시간 계산용.
+	// HandleSessionEnd 안내, 후속 분석 등에서 "세션이 얼마나 오래 진행됐는지" 정확히 표시.
+	StartedAt time.Time
+
 	// NoteFormat은 미팅 종료 시 생성할 노트 포맷.
 	// 미팅 시작 시 default(FormatDecisionStatus). 사용자가 종료 시 4 버튼 중
 	// 하나를 선택하기 직전까지의 잠정값. 실제 finalize는 인자로 명시 전달.
@@ -288,7 +293,10 @@ func cleanupSessions() {
 		for id, sess := range sessions {
 			timeout := 5 * time.Minute
 			if sess.Mode == ModeMeeting {
-				timeout = 2 * time.Hour
+				// Phase 3 — 거시 디자인 결정 11: 미팅 모드 idle 6h.
+				// 기존 2h는 일반 미팅에 적합했으나 super-session(미팅+주간+릴리즈+잡담+노트정리)은
+				// 더 길게 유지될 수 있어 6h로 확장. 명시적 [세션 종료] button을 두는 모델과 짝.
+				timeout = 6 * time.Hour
 			}
 			if now.Sub(sess.UpdatedAt) > timeout {
 				mode := "normal"

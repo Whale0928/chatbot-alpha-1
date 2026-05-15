@@ -16,6 +16,22 @@ import (
 // 이벤트 엔트리 핸들러
 // =====================================================================
 
+// interactionCallerUsername은 InteractionCreate에서 호출자 username을 안전하게 추출한다.
+// guild interaction은 i.Member.User에, DM interaction은 i.User에 사용자 정보가 들어감.
+// 둘 다 nil이면 "?" fallback (로그용 — panic 방지).
+func interactionCallerUsername(i *discordgo.InteractionCreate) string {
+	if i == nil {
+		return "?"
+	}
+	if i.Member != nil && i.Member.User != nil {
+		return i.Member.User.Username
+	}
+	if i.User != nil {
+		return i.User.Username
+	}
+	return "?"
+}
+
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.ID == s.State.User.ID {
 		return
@@ -152,13 +168,14 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		sess.StickyMessageID = ""
 		sess.Directive = ""
 		log.Printf("[미팅/start] 미팅 모드 진입 thread=%s user=%s", sess.ThreadID, sess.UserID)
-		respondInteraction(s, i, "미팅을 시작합니다. 메시지를 자유롭게 입력하세요. 하단 [중간 요약] 버튼으로 진행 상황을 정리할 수 있고, [미팅 종료] 버튼 또는 \"미팅 종료\" 입력으로 마무리할 수 있습니다.")
-		// 초기 sticky 컨트롤 메시지 전송 - 맨 아래에 [중간 요약][미팅 종료] 버튼이 항상 보이도록.
+		respondInteraction(s, i, "미팅을 시작합니다. 자유롭게 메시지를 입력하세요. 하단 sticky 버튼으로 [중간 요약]/[주간 추가]/[릴리즈 추가]/[에이전트]/[노트 정리]를 같은 스레드에서 실행할 수 있고, [세션 종료]로 마무리할 수 있습니다. (\"미팅 종료\" 입력도 가능)")
+		// 초기 sticky 컨트롤 메시지 전송 - Phase 3 super-session 6 button (Row1: [중간 요약]
+		// [주간 추가][릴리즈 추가][에이전트][노트 정리] / Row2: [세션 종료])이 항상 보이도록.
 		sendSticky(s, sess)
 
 	// interim/sticky 메시지 하단 "미팅 종료" 버튼 → 4 포맷 선택 prompt
 	case customIDMeetingEndBtn:
-		log.Printf("[미팅/end] 종료 버튼 클릭 thread=%s by=%s", sess.ThreadID, i.Member.User.Username)
+		log.Printf("[미팅/end] 종료 버튼 클릭 thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
 		deleteStickyIfPresent(s, sess)
 		respondInteractionWithComponents(s, i,
 			"어떤 포맷으로 정리할까요?\n\n"+
@@ -185,7 +202,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			ack += fmt.Sprintf("\n(추가 요청 반영: %s)", truncate(sess.Directive, 80))
 		}
 		log.Printf("[미팅/end] 포맷 선택 thread=%s format=%s by=%s directive_runes=%d",
-			sess.ThreadID, format, i.Member.User.Username, len([]rune(sess.Directive)))
+			sess.ThreadID, format, interactionCallerUsername(i), len([]rune(sess.Directive)))
 		respondInteraction(s, i, ack)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
@@ -211,13 +228,33 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			log.Printf("[미팅/end] 세션 보존 (재시도 대기) thread=%s", sess.ThreadID)
 		}
 
+	// === Phase 3 chunk 3B-1 — super-session sub-action button (stub) ===
+	// 본격 구현은 chunk 3B-2 (이 스레드 안에서 실행 + segment 누적, 같은 corpus에 합쳐짐).
+	// stub은 거시 결정 1(같은 스레드 컨테이너) 모델과 일관되게 안내 — 사용자에게 "메인 채널로 가라"
+	// 안내하지 않음 (그러면 컨텍스트 분리 = 결정 1 위반).
+	case customIDSubActionWeekly:
+		respondInteraction(s, i, "[주간 추가]는 이 스레드 안에서 주간 분석을 실행해 결과를 같은 corpus에 누적합니다. Phase 3 chunk 3B-2에서 활성화 예정입니다.")
+	case customIDSubActionRelease:
+		respondInteraction(s, i, "[릴리즈 추가]는 이 스레드 안에서 릴리즈 작업을 실행해 결과를 같은 corpus에 누적합니다. Phase 3 chunk 3B-2에서 활성화 예정입니다.")
+	case customIDSubActionAgent:
+		respondInteraction(s, i, "[에이전트]는 이 스레드 안에서 자유 자연어 지시를 실행해 결과를 같은 corpus에 누적합니다. Phase 3 chunk 3B-2에서 활성화 예정입니다.")
+
+	// === Phase 3 chunk 3D — 명시 [세션 종료] button ===
+	// finalize와 분리된 명시 종료. HandleSessionEnd가 sticky 제거 + DB close + in-memory 정리.
+	case customIDSessionEnd:
+		log.Printf("[세션/end] 클릭 thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
+		respondInteraction(s, i, "세션을 종료합니다...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		HandleSessionEnd(ctx, s, sess)
+
 	// === Phase 2 chunk 3c — 정리본 메시지의 4 포맷 토글 button ===
 	// DB에서 SummarizedContent 조회 → 새 포맷 렌더 → 메시지 edit. LLM 재호출 없음.
 	case customIDFormatToggleDecisionStatus,
 		customIDFormatToggleDiscussion,
 		customIDFormatToggleRoleBased,
 		customIDFormatToggleFreeform:
-		log.Printf("[미팅/format_toggle] 클릭 thread=%s customID=%s by=%s", sess.ThreadID, data.CustomID, i.Member.User.Username)
+		log.Printf("[미팅/format_toggle] 클릭 thread=%s customID=%s by=%s", sess.ThreadID, data.CustomID, interactionCallerUsername(i))
 		// 즉시 ack (defer 응답) — 토글은 UX상 매우 빠름 (DB read + render 순수)
 		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseDeferredMessageUpdate,
@@ -232,7 +269,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// === Phase 2 chunk 3b — [정리본 통합·토글] 버튼 → SummarizedContent 1회 추출 ===
 	// LLM 1회 호출 후 default(decision_status)로 렌더 + 4 포맷 토글 button row 첨부.
 	case customIDFinalizeSummarized:
-		log.Printf("[미팅/finalize_summarized] 클릭 thread=%s by=%s", sess.ThreadID, i.Member.User.Username)
+		log.Printf("[미팅/finalize_summarized] 클릭 thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
 		respondInteraction(s, i, "정리본을 추출하는 중입니다...")
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
@@ -255,7 +292,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// [추가 요청] 버튼 → 사용자 정리 지시 입력 대기 상태로 전환
 	case customIDDirectiveBtn:
 		sess.State = StateMeetingAwaitDirective
-		log.Printf("[미팅/directive] 입력 대기 진입 thread=%s by=%s", sess.ThreadID, i.Member.User.Username)
+		log.Printf("[미팅/directive] 입력 대기 진입 thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
 		respondInteraction(s, i,
 			"원하는 정리 방식을 한 메시지로 적어주세요.\n"+
 				"예) `프론트엔드/백엔드/기획 H3 섹션으로 묶고, 각 항목은 bullet, 부연은 sub-bullet으로`")
@@ -264,7 +301,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	case customIDDirectiveRetryBtn:
 		sess.Directive = ""
 		sess.State = StateMeetingAwaitDirective
-		log.Printf("[미팅/directive] 재입력 진입 thread=%s by=%s", sess.ThreadID, i.Member.User.Username)
+		log.Printf("[미팅/directive] 재입력 진입 thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
 		respondInteraction(s, i, "이전 지시를 비웠습니다. 새 정리 지시를 한 메시지로 적어주세요.")
 
 	// sticky/interim 메시지 하단 "중간 요약" 버튼
@@ -273,7 +310,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			respondInteraction(s, i, "미팅 모드에서만 중간 요약을 사용할 수 있습니다.")
 			return
 		}
-		log.Printf("[미팅/interim] 버튼 클릭 thread=%s by=%s", sess.ThreadID, i.Member.User.Username)
+		log.Printf("[미팅/interim] 버튼 클릭 thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
 		respondInteraction(s, i, "중간 요약을 정리하는 중입니다...")
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
@@ -349,13 +386,15 @@ func openThread(s *discordgo.Session, m *discordgo.MessageCreate, content string
 		return
 	}
 
+	now := time.Now()
 	sess := &Session{
 		Mode:      ModeNormal,
 		State:     StateSelectMode,
 		ThreadID:  thread.ID,
 		UserID:    m.Author.ID,
 		GuildID:   m.GuildID,
-		UpdatedAt: time.Now(),
+		UpdatedAt: now,
+		StartedAt: now, // Phase 3: lifecycle 경과 측정용 (UpdatedAt과 분리)
 	}
 	sessionsMu.Lock()
 	sessions[thread.ID] = sess
