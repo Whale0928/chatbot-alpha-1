@@ -568,7 +568,12 @@ func handleReleaseConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, 
 		Embeds: []*discordgo.MessageEmbed{renderReleaseProgress(rc, 0, "")},
 	})
 	if err != nil {
-		log.Printf("[릴리즈/progress] 초기 전송 실패 thread=%s: %v", sess.ThreadID, err)
+		// codex 5차 P2 fix: 초기 progress 메시지 전송 실패 시 goroutine 안 뜨고 deferred Store(false)도 실행 X
+		// → InProgress가 true로 영구 stuck. 이 early-return 경로에서 명시 reset.
+		rc.InProgress.Store(false)
+		logError("release", "progress_init_failed",
+			"초기 progress 메시지 전송 실패 — runReleaseFlow 미발사 + InProgress reset", err,
+			lf("thread", sess.ThreadID), lf("module", rc.Module.Key))
 		return
 	}
 	rc.ProgressMsgID = msg.ID
