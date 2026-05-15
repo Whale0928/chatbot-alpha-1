@@ -295,7 +295,8 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	case customIDSubActionRelease:
 		// codex review P3 fix: rc.InProgress 사용 — abandoned ReleaseCtx (bump 선택 후 [확인] 안 누름)는
 		// 더 이상 사용자를 가두지 않고 새 release 진입 허용. 기존 PRNumber==0 가드는 abandoned/in-flight 구분 X.
-		if sess.ReleaseCtx != nil && sess.ReleaseCtx.InProgress {
+		// 3차 race fix: atomic.Bool .Load() — runReleaseFlow goroutine과 cross-access 안전.
+		if sess.ReleaseCtx != nil && sess.ReleaseCtx.InProgress.Load() {
 			logGuard("release", "single_in_progress", "단일 release 진행 중 — 새 진입 reject",
 				lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
 				lf("module", sess.ReleaseCtx.Module.Key))
@@ -304,7 +305,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 		// B-3 추가 가드: batch release(InProgress=true)도 단일 release 진입 reject.
 		// Selections만 박제된 미진행 batch ctx는 사용자가 마음 바뀐 케이스 — 덮어쓰기 허용.
-		if sess.BatchReleaseCtx != nil && sess.BatchReleaseCtx.InProgress {
+		if sess.BatchReleaseCtx != nil && sess.BatchReleaseCtx.InProgress.Load() {
 			logGuard("release", "batch_in_progress", "batch release 진행 중 — 단일 release 진입 reject",
 				lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
 				lf("selected", sess.BatchReleaseCtx.SelectedCount()))

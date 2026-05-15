@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"chatbot-alpha-1/pkg/db"
@@ -119,10 +120,25 @@ type ReleaseContext struct {
 	// 실패 시 renderReleaseProgress 에 -LastStep 으로 전달해 어디서 실패했는지 시각화.
 	LastStep int
 
-	// InProgress는 runReleaseFlow가 실행 중인지 표시 (codex review P2/P3 수정).
-	// 단순 PRNumber==0 가드는 "abandoned vs in-flight" 구분 못해 abandoned ctx가 영구 잔존하면
-	// 재진입 차단됨. InProgress는 runReleaseFlow가 시작 시 true, defer로 false로 명확히 lifecycle 표시.
-	InProgress bool
+	// InProgress는 runReleaseFlow가 실행 중인지 표시 (codex review P2/P3 + 3/4차 race fix).
+	// runReleaseFlow는 background goroutine, 가드 read는 interaction handler goroutine — cross-goroutine
+	// access이므로 atomic.Bool 사용 (평범한 bool은 -race 검출됨, 운영 중 가드 flaky 위험).
+	// lifecycle (Copilot 4차 CAS pattern):
+	//   - handleReleaseConfirm가 CompareAndSwap(false, true)로 진입 commit (단일 진입 원자 보장).
+	//   - runReleaseFlow는 defer로 Store(false)만 수행 (시작 시 Store(true) X — caller가 commit).
+	//   - 5차 fix: handleReleaseConfirm의 progress 전송 early-return 경로에서도 Store(false) 명시.
+	// 가드 read는 Load() — handleReleaseLine("all") / customIDSubActionRelease가 in-flight 판정.
+	InProgress atomic.Bool
+
+	// Failed는 runReleaseFlow가 에러로 종료됐는지 표시 (codex review 4차 P2 fix).
+	//
+	// 배경: 3차 fix에서 updateProgressError의 sess.ReleaseCtx = nil cleanup을 race 위험으로 제거 →
+	// 실패한 ctx가 sess에 남고 원래 confirmation 메시지의 [확인] button이 살아있음 → stale FileSHA/Tag로
+	// 재실행되어 GitHub 중복 operation 위험.
+	//
+	// updateProgressError가 background goroutine에서 Store(true), handleReleaseConfirm이 Load()로 reject.
+	// lifecycle 단방향 — 한 번 Failed=true가 되면 그 ctx는 사용 불가, 새 ctx를 만들어야 재시도 가능.
+	Failed atomic.Bool
 }
 
 // IsFirstRelease는 module.TagPrefix 매칭 태그가 0개였던 첫 릴리즈 시나리오인지 판단한다.
@@ -142,23 +158,57 @@ func (rc *ReleaseContext) IsFirstRelease() bool {
 // BatchReleaseContext는 [전체] 라인의 batch release 흐름 누적 상태.
 //
 // 단일 release(ReleaseContext)와 동시 진행 X — customIDSubActionRelease 가드와 [전체] 진입 가드가
-// cross-check해서 한 시점에 하나만 활성. 둘 중 하나가 진행 중(InProgress 또는 PRNumber=0)이면
-// 다른 진입은 reject.
+// cross-check해서 한 시점에 하나만 활성. InProgress.Load() == true면 다른 진입 reject.
+//
+// 동시성 정책 (codex 3차 race fix):
+//   - InProgress: atomic.Bool — interaction handler goroutine과 background goroutine이 cross-access.
+//   - Selections: mu(sync.Mutex)로 보호 — discordgo가 InteractionCreate를 goroutine마다 dispatch하므로
+//     서로 다른 사용자가 동시에 SelectMenu 클릭하면 평범한 map은 "concurrent map writes"로 panic. 운영 패닉 critical.
+//     모든 read/write는 SetSelection / SnapshotSelections / HasAnySelection / SelectedCount accessor 경유.
+//   - Modules: 한 번 set 후 read-only — 별도 보호 불필요.
 //
 // 흐름:
 //   [전체] 클릭 → handleReleaseLine("all") → BatchReleaseCtx 초기화 + sendBatchReleasePrompt
-//   사용자 모듈별 StringSelectMenu 선택 → handleBatchReleaseSelect → Selections[module.Key] = bump
-//   [모두 진행] 클릭 → handleBatchReleaseStart → B-4 goroutine 병렬 발사
+//   사용자 모듈별 StringSelectMenu 선택 → handleBatchReleaseSelect → SetSelection(key, bump)
+//   [모두 진행] 클릭 → handleBatchReleaseStart → SnapshotSelections + B-4 goroutine 병렬 발사
 type BatchReleaseContext struct {
-	Modules    []release.Module            // 대상 모듈 — release.Modules slice 그대로 (4개)
-	Selections map[string]release.BumpType // module.Key → bump (없는 키 = 사용자 미선택 = 진행 시 skip)
-	InProgress bool                        // [모두 진행] 발사 후 true (race 방어 — 중복 클릭 reject)
+	Modules    []release.Module // 대상 모듈 — release.Modules slice 그대로 (4개). 한 번 set 후 read-only.
+	InProgress atomic.Bool      // [모두 진행] 발사 후 true (race 방어 — 중복 클릭 reject).
+
+	// mu는 selections 보호 — discordgo의 goroutine-per-interaction dispatch 모델에서 동시 SelectMenu 클릭이
+	// 평범한 map을 concurrent write하면 Go runtime이 "fatal error: concurrent map writes"로 프로세스 자체를 panic.
+	// 모든 selections 접근은 mu.Lock()/Unlock() 안에서만 (accessor methods 경유).
+	mu         sync.Mutex
+	selections map[string]release.BumpType // module.Key → bump (없는 키 = 사용자 미선택 = 진행 시 skip).
 }
 
-// HasAnySelection은 사용자가 1개라도 모듈 bump를 선택했는지 검사한다.
-// Selections가 nil이거나 비어있으면 false.
+// SetSelection은 모듈 bump 선택을 박제한다 (mu 보호). 동시 호출 안전.
+func (bc *BatchReleaseContext) SetSelection(moduleKey string, bump release.BumpType) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if bc.selections == nil {
+		bc.selections = map[string]release.BumpType{}
+	}
+	bc.selections[moduleKey] = bump
+}
+
+// SnapshotSelections는 selections의 immutable copy를 반환한다 — goroutine spawn 직전에 호출해
+// 이후 사용자가 SelectMenu를 더 누르더라도 진행 중인 release flow가 영향받지 않게.
+func (bc *BatchReleaseContext) SnapshotSelections() map[string]release.BumpType {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	out := make(map[string]release.BumpType, len(bc.selections))
+	for k, v := range bc.selections {
+		out[k] = v
+	}
+	return out
+}
+
+// HasAnySelection은 사용자가 1개라도 모듈 bump를 선택했는지 검사한다 (mu 보호).
 func (bc *BatchReleaseContext) HasAnySelection() bool {
-	for _, b := range bc.Selections {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	for _, b := range bc.selections {
 		if b != release.BumpUnknown {
 			return true
 		}
@@ -166,15 +216,25 @@ func (bc *BatchReleaseContext) HasAnySelection() bool {
 	return false
 }
 
-// SelectedCount는 BumpUnknown이 아닌 선택 개수를 센다 ([모두 진행] 안내 메시지용).
+// SelectedCount는 BumpUnknown이 아닌 선택 개수를 센다 (mu 보호).
 func (bc *BatchReleaseContext) SelectedCount() int {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
 	n := 0
-	for _, b := range bc.Selections {
+	for _, b := range bc.selections {
 		if b != release.BumpUnknown {
 			n++
 		}
 	}
 	return n
+}
+
+// GetSelection은 특정 모듈의 현재 선택을 반환 (mu 보호). 없으면 BumpUnknown.
+// batchReleaseModuleComponents가 default 옵션 표시할 때 사용.
+func (bc *BatchReleaseContext) GetSelection(moduleKey string) release.BumpType {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	return bc.selections[moduleKey]
 }
 
 // =====================================================================
@@ -231,15 +291,15 @@ func handleReleaseLine(s *discordgo.Session, i *discordgo.InteractionCreate, ses
 		// B-3: [전체] — 단일 release ctx 정리, batch 흐름 진입.
 		// codex review P2 fix: 가드는 rc.InProgress 사용 — handleReleaseEntry가 라인 선택 직전에
 		// 항상 빈 ReleaseCtx{}를 만들기 때문에 PRNumber==0 가드는 정상 [전체] 진입도 reject.
-		// rc.InProgress는 runReleaseFlow가 실제 goroutine 실행 중일 때만 true.
-		if sess.ReleaseCtx != nil && sess.ReleaseCtx.InProgress {
+		// rc.InProgress는 runReleaseFlow가 실제 goroutine 실행 중일 때만 true. 3차 race fix: atomic.Bool.
+		if sess.ReleaseCtx != nil && sess.ReleaseCtx.InProgress.Load() {
 			logGuard("release/batch", "single_in_progress", "단일 release 진행 중 — [전체] 진입 reject",
 				lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
 				lf("module", sess.ReleaseCtx.Module.Key))
 			respondInteraction(s, i, "현재 진행 중인 단일 릴리즈가 있습니다. 완료 후 [전체]를 다시 시도해주세요.")
 			return
 		}
-		if sess.BatchReleaseCtx != nil && sess.BatchReleaseCtx.InProgress {
+		if sess.BatchReleaseCtx != nil && sess.BatchReleaseCtx.InProgress.Load() {
 			logGuard("release/batch", "batch_in_progress", "batch release 진행 중 — 새 [전체] 진입 reject",
 				lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
 				lf("selected", sess.BatchReleaseCtx.SelectedCount()))
@@ -265,9 +325,9 @@ func handleReleaseLine(s *discordgo.Session, i *discordgo.InteractionCreate, ses
 				len(modules), batchReleaseMaxModules))
 			return
 		}
+		// selections는 SetSelection 호출 시 lazy 초기화 — 빈 map 미리 set 불필요.
 		sess.BatchReleaseCtx = &BatchReleaseContext{
-			Modules:    modules,
-			Selections: map[string]release.BumpType{},
+			Modules: modules,
 		}
 		logEvent("release/batch", "start", "[전체] 진입 — 모듈 선택 prompt 발사",
 			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
@@ -481,6 +541,27 @@ func handleReleaseConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, 
 		respondInteraction(s, i, "릴리즈 컨텍스트가 만료되었습니다. sticky의 [릴리즈 PR 만들기] button으로 다시 시작해주세요.")
 		return
 	}
+	// codex 4차 P2 fix: 실패 종료된 ctx의 stale [확인] 버튼 재클릭 reject — stale FileSHA/Tag로 재실행하면
+	// GitHub 중복 commit/tag/PR 위험. 사용자는 sticky의 [릴리즈 PR 만들기]를 다시 눌러 새 ctx로 시작해야 함.
+	if rc.Failed.Load() {
+		logGuard("release", "stale_failed_ctx", "실패한 release ctx의 [확인] button 재클릭 — reject",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+			lf("module", rc.Module.Key), lf("step", rc.LastStep))
+		respondInteraction(s, i, "이전 release가 실패한 상태입니다. sticky의 [릴리즈 PR 만들기]로 새로 시작해주세요. (stale 컨텍스트 재실행은 GitHub 중복 작업 위험으로 차단)")
+		return
+	}
+	// codex 4차 + Copilot 4차 fix: CompareAndSwap으로 [확인] 중복/동시 클릭 단일 진입 보장.
+	// Load() then runReleaseFlow goroutine이 Store(true)하는 pattern은 race window 존재 —
+	// 두 click이 동시 도착하면 둘 다 Load=false 보고 통과 → 두 개 goroutine 동시 실행 → 중복 PR/rc race.
+	// CAS는 atomic — 한 click만 false→true 전이 성공, 다른 click은 false 받고 reject.
+	if !rc.InProgress.CompareAndSwap(false, true) {
+		logGuard("release", "double_confirm", "[확인] button 중복/동시 click — 이미 진행 중",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+			lf("module", rc.Module.Key))
+		respondInteraction(s, i, "이미 release가 진행 중입니다. 완료 후 다시 시도해주세요.")
+		return
+	}
+	// 여기 도달했으면 InProgress.CAS 성공 — 이 goroutine만 진행. runReleaseFlow는 defer로 Store(false)만 수행.
 
 	// ack — 진행 표시 메시지는 별도 channel send
 	respondInteraction(s, i, fmt.Sprintf("`%s` 릴리즈를 진행합니다. (`v%s` → `v%s`)",
@@ -491,7 +572,12 @@ func handleReleaseConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, 
 		Embeds: []*discordgo.MessageEmbed{renderReleaseProgress(rc, 0, "")},
 	})
 	if err != nil {
-		log.Printf("[릴리즈/progress] 초기 전송 실패 thread=%s: %v", sess.ThreadID, err)
+		// codex 5차 P2 fix: 초기 progress 메시지 전송 실패 시 goroutine 안 뜨고 deferred Store(false)도 실행 X
+		// → InProgress가 true로 영구 stuck. 이 early-return 경로에서 명시 reset.
+		rc.InProgress.Store(false)
+		logError("release", "progress_init_failed",
+			"초기 progress 메시지 전송 실패 — runReleaseFlow 미발사 + InProgress reset", err,
+			lf("thread", sess.ThreadID), lf("module", rc.Module.Key))
 		return
 	}
 	rc.ProgressMsgID = msg.ID
@@ -530,9 +616,13 @@ func runReleaseSteps(ctx context.Context, rc *ReleaseContext, statusFn ReleaseSt
 		commits []github.Commit
 		files   []github.ComparisonFile
 	)
-	// codex review 2차 P1 isolation: batch 모드(rc.HeadBranch != "")는 항상 main HEAD를 BaseSHA로 캡처.
-	// 같은 repo의 다른 batch 모듈이 main을 forward하기 전에 snapshot을 잡아 isolated head 브랜치 base로 사용.
-	// 단일 모드는 첫 릴리즈만 main HEAD 캡처 (기존 동작 보존).
+	// BaseSHA 정책 (실제 동작):
+	//   - 첫 릴리즈(IsFirstRelease): main HEAD를 BaseSHA로 캡처 (release/* 브랜치 base 용도)
+	//   - 그 외: PrevTagCommitSHA를 BaseSHA로 사용 (직전 tag commit)
+	//
+	// Batch 모드(rc.HeadBranch != "")의 head 브랜치 base는 BaseSHA가 아닌 별도 batchHeadBaseSHA로 항상 main HEAD에서 캡처
+	// (아래 별도 분기). 같은 repo의 다른 batch 모듈이 main을 forward하기 전에 snapshot을 잡아 isolated head 브랜치 base로 사용.
+	// 즉 BaseSHA = release branch base, batchHeadBaseSHA = head branch base — 의미 다름.
 	if rc.IsFirstRelease() {
 		windowDays := int(firstReleaseLookback / (24 * time.Hour))
 		statusFn(1, fmt.Sprintf("첫 릴리즈 — 지난 %d일 main 커밋 수집 중...", windowDays))
@@ -722,11 +812,15 @@ func runReleaseSteps(ctx context.Context, rc *ReleaseContext, statusFn ReleaseSt
 // runReleaseSteps + 단일 모드 progress UI/sendResult/sticky/polling을 wrap한다.
 //
 // codex review P2/P3 fix: rc.InProgress lifecycle을 명확히 마킹 — sticky [릴리즈 PR 만들기] 가드가
-// "in-flight vs abandoned" 구분 가능. 시작 시 true, defer로 false (성공/실패 모두).
+// "in-flight vs abandoned" 구분 가능.
+//
+// 3차 race fix: atomic.Bool — interaction handler가 동시에 .Load()로 가드 체크.
+// 4차 race fix (Copilot): InProgress.Store(true)는 caller(handleReleaseConfirm)가 CompareAndSwap으로 미리
+// commit. runReleaseFlow는 defer로 Store(false)만 수행해 동시 [확인] click이 두 goroutine 동시 발사하는
+// race 차단 (Load+Store pattern은 race window 존재).
 func runReleaseFlow(s *discordgo.Session, sess *Session, rc *ReleaseContext) {
-	rc.InProgress = true
 	defer func() {
-		rc.InProgress = false
+		rc.InProgress.Store(false)
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -823,7 +917,14 @@ func updateProgressError(s *discordgo.Session, sess *Session, rc *ReleaseContext
 	}); err != nil {
 		log.Printf("[릴리즈/progress] error edit 실패: %v", err)
 	}
-	sess.ReleaseCtx = nil
+	// 3차 race fix: 이전엔 sess.ReleaseCtx = nil로 직접 cleanup했으나 background goroutine에서 sess 포인터를
+	// mutate하면 interaction handler 동시 read와 race. runReleaseFlow defer가 InProgress.Store(false)로
+	// lifecycle을 표시하므로 가드는 InProgress.Load()로 abandoned 처리 가능. 다음 sticky 진입 시
+	// customIDSubActionRelease handler가 sess.ReleaseCtx = nil을 main goroutine에서 정리.
+	//
+	// 4차 P2 fix: 추가로 rc.Failed.Store(true)로 stale [확인] button의 재실행 차단.
+	// handleReleaseConfirm이 Failed=true를 감지해 reject — sess.ReleaseCtx에 남아 있어도 재실행 X.
+	rc.Failed.Store(true)
 	if sess.Mode == ModeMeeting {
 		sendSticky(s, sess)
 	}
@@ -886,7 +987,7 @@ func handleReleaseBackModule(s *discordgo.Session, i *discordgo.InteractionCreat
 		return
 	}
 	if sess.ReleaseCtx.Module.Key == "" {
-		// 비정상 경로 — 모듈 선택 전엔 doone 안 됨. 안전하게 라인 선택으로 fallback.
+		// 비정상 경로 — 모듈 선택 전엔 done 안 됨. 안전하게 라인 선택으로 fallback.
 		logGuard("release", "back_module_no_module", "ReleaseCtx.Module 미설정 — 라인 화면으로 fallback",
 			lf("thread", sess.ThreadID))
 		respondInteractionWithComponents(s, i, "어떤 라인을 릴리즈할까요?", releaseLineComponents())
@@ -1061,10 +1162,18 @@ func followupErr(s *discordgo.Session, i *discordgo.InteractionCreate, msg strin
 //   - 한도 초과는 handleReleaseLine("all")이 진입 시점에 reject (silent 깨짐 방지).
 //
 // Selections 박제 상태가 있으면 Default 옵션으로 그 bump를 미리 선택해 보여준다 (in-place edit 후 재발사 시).
+//
+// 3차 race fix: bc.selections 직접 read 대신 SnapshotSelections로 immutable copy를 한 번만 가져와서 사용 —
+// rendering 도중 다른 사용자의 SetSelection 호출이 같은 map을 mutate해도 안전.
 func batchReleaseModuleComponents(bc *BatchReleaseContext) []discordgo.MessageComponent {
+	selections := bc.SnapshotSelections()
 	rows := make([]discordgo.MessageComponent, 0, len(bc.Modules)+1)
+	selected := 0
 	for _, m := range bc.Modules {
-		current := bc.Selections[m.Key]
+		current := selections[m.Key]
+		if current != release.BumpUnknown {
+			selected++
+		}
 		opts := []discordgo.SelectMenuOption{
 			{Label: "메이저 (major)", Value: "major", Default: current == release.BumpMajor},
 			{Label: "마이너 (minor)", Value: "minor", Default: current == release.BumpMinor},
@@ -1085,7 +1194,8 @@ func batchReleaseModuleComponents(bc *BatchReleaseContext) []discordgo.MessageCo
 			},
 		})
 	}
-	startLabel := fmt.Sprintf("모두 진행 (선택 %d개)", bc.SelectedCount())
+	// 같은 snapshot 기반으로 카운트 — SelectedCount 별도 호출 시 lock 한 번 더 + race 시점 차이 가능.
+	startLabel := fmt.Sprintf("모두 진행 (선택 %d개)", selected)
 	rows = append(rows, discordgo.ActionsRow{
 		Components: []discordgo.MessageComponent{
 			discordgo.Button{
@@ -1100,12 +1210,15 @@ func batchReleaseModuleComponents(bc *BatchReleaseContext) []discordgo.MessageCo
 
 // batchReleasePromptHeader는 사용자에게 보여주는 안내 문구 + 현재 선택 요약.
 // 매 selection마다 갱신되어 in-place edit으로 재전송된다.
+//
+// 3차 race fix: SnapshotSelections로 immutable copy 사용.
 func batchReleasePromptHeader(bc *BatchReleaseContext) string {
+	selections := bc.SnapshotSelections()
 	var b strings.Builder
 	b.WriteString("**[전체] batch release** — 모듈별로 bump를 선택하고 [모두 진행]을 눌러주세요.\n")
 	b.WriteString("미선택 모듈은 release 대상에서 자동 제외됩니다.\n\n")
 	for _, m := range bc.Modules {
-		cur := bc.Selections[m.Key]
+		cur := selections[m.Key]
 		if cur == release.BumpUnknown {
 			fmt.Fprintf(&b, "- `%s` (%s): _미선택_\n", m.Key, m.DisplayName)
 		} else {
@@ -1153,7 +1266,7 @@ func handleBatchReleaseSelect(s *discordgo.Session, i *discordgo.InteractionCrea
 		respondInteractionEphemeral(s, i, "batch release 컨텍스트가 만료되었습니다. sticky의 [릴리즈 PR 만들기] → [전체]로 다시 시작해주세요.")
 		return
 	}
-	if sess.BatchReleaseCtx.InProgress {
+	if sess.BatchReleaseCtx.InProgress.Load() {
 		logGuard("release/batch", "in_progress", "batch 진행 중 — select reject",
 			lf("thread", sess.ThreadID), lf("module", moduleKey))
 		respondInteractionEphemeral(s, i, "이미 batch release가 진행 중입니다.")
@@ -1179,10 +1292,8 @@ func handleBatchReleaseSelect(s *discordgo.Session, i *discordgo.InteractionCrea
 		respondInteractionEphemeral(s, i, fmt.Sprintf("알 수 없는 bump: %q", data.Values[0]))
 		return
 	}
-	if sess.BatchReleaseCtx.Selections == nil {
-		sess.BatchReleaseCtx.Selections = map[string]release.BumpType{}
-	}
-	sess.BatchReleaseCtx.Selections[moduleKey] = bump
+	// 3차 race fix: 평범한 map 직접 mutate → SetSelection accessor (mu 보호) 경유.
+	sess.BatchReleaseCtx.SetSelection(moduleKey, bump)
 	logEvent("release/batch", "select", "모듈 bump 선택 박제",
 		lf("thread", sess.ThreadID), lf("module", moduleKey), lf("bump", bump.String()),
 		lf("selected", sess.BatchReleaseCtx.SelectedCount()))
@@ -1215,13 +1326,9 @@ func handleBatchReleaseStart(s *discordgo.Session, i *discordgo.InteractionCreat
 		respondInteraction(s, i, "batch release 컨텍스트가 만료되었습니다. sticky의 [릴리즈 PR 만들기] → [전체]로 다시 시작해주세요.")
 		return
 	}
-	if bc.InProgress {
-		logGuard("release/batch", "double_start", "[모두 진행] 중복 click — 이미 진행 중",
-			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
-			lf("selected", bc.SelectedCount()))
-		respondInteractionEphemeral(s, i, "이미 batch release가 진행 중입니다.")
-		return
-	}
+	// 3차 race fix: 사전 read-only 가드(SelectedCount 0 / github / llm) 먼저 통과시키고,
+	// 마지막에 CompareAndSwap(false, true)으로 race-safe 단일 진입 commit.
+	// (CAS를 먼저 두면 중복 클릭은 막아도 read-only fail 시 InProgress=true 박제로 다음 정상 클릭이 막히는 부작용.)
 	if !bc.HasAnySelection() {
 		logGuard("release/batch", "no_selection", "선택 0개 — 발사 reject",
 			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)))
@@ -1240,19 +1347,27 @@ func handleBatchReleaseStart(s *discordgo.Session, i *discordgo.InteractionCreat
 		respondInteraction(s, i, "LLM 클라이언트가 초기화되지 않아 batch release를 시작할 수 없습니다.")
 		return
 	}
-	bc.InProgress = true
+	if !bc.InProgress.CompareAndSwap(false, true) {
+		logGuard("release/batch", "double_start", "[모두 진행] 중복 click — 이미 진행 중",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+			lf("selected", bc.SelectedCount()))
+		respondInteractionEphemeral(s, i, "이미 batch release가 진행 중입니다.")
+		return
+	}
 
-	selected := make([]string, 0, bc.SelectedCount())
+	// snapshot으로 selected 목록 구성 (race-safe).
+	selections := bc.SnapshotSelections()
+	selected := make([]string, 0, len(selections))
 	for _, m := range bc.Modules {
-		if b, ok := bc.Selections[m.Key]; ok && b != release.BumpUnknown {
+		if b, ok := selections[m.Key]; ok && b != release.BumpUnknown {
 			selected = append(selected, fmt.Sprintf("%s=%s", m.Key, b))
 		}
 	}
 	logEvent("release/batch", "fire", "[모두 진행] click — N goroutine 발사",
 		lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
-		lf("selected", bc.SelectedCount()), lf("modules", strings.Join(selected, ",")))
+		lf("selected", len(selected)), lf("modules", strings.Join(selected, ",")))
 
-	respondInteraction(s, i, fmt.Sprintf("Batch release 발사 — 모듈 %d개 (%s)", bc.SelectedCount(), strings.Join(selected, ", ")))
+	respondInteraction(s, i, fmt.Sprintf("Batch release 발사 — 모듈 %d개 (%s)", len(selected), strings.Join(selected, ", ")))
 	go runBatchReleaseFlow(s, sess, bc)
 }
 
@@ -1511,21 +1626,24 @@ func setupReleaseContextForBatch(ctx context.Context, module release.Module, bum
 //  3. WaitGroup로 N goroutine 병렬 발사 (각각 runOneBatchModule)
 //  4. 모든 goroutine done → batchProgress finish (마지막 edit)
 //  5. 합본 결과 메시지 send (성공/실패 + PR URL)
-//  6. BatchReleaseCtx.InProgress = false (cleanup)
+//  6. defer로 bc.InProgress.Store(false) (atomic.Bool — 3차 race fix)
 //  7. sendSticky 재발사 (A-8 일관성)
 func runBatchReleaseFlow(s *discordgo.Session, sess *Session, bc *BatchReleaseContext) {
 	startedAt := time.Now()
 	defer func() {
-		bc.InProgress = false
+		bc.InProgress.Store(false)
 		if sess.Mode == ModeMeeting {
 			sendSticky(s, sess)
 		}
 	}()
 
 	// 1. job 리스트 구성 (선택된 모듈만, original Modules 순서 유지).
-	jobs := make([]*batchModuleJob, 0, bc.SelectedCount())
+	// 3차 race fix: SnapshotSelections로 immutable copy를 한 번만 가져와서 사용 — 진행 중에 사용자가
+	// 추가 SelectMenu 클릭하더라도 (이론상 InProgress 가드로 막혀 있지만 race 시점) job 구성에 영향 X.
+	selections := bc.SnapshotSelections()
+	jobs := make([]*batchModuleJob, 0, len(selections))
 	for _, m := range bc.Modules {
-		bump, ok := bc.Selections[m.Key]
+		bump, ok := selections[m.Key]
 		if !ok || bump == release.BumpUnknown {
 			continue
 		}
