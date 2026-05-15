@@ -32,6 +32,14 @@ spec:
           envFrom:
             - secretRef:
                 name: chatbot-alpha-1-secrets
+          env:
+            # SQLite 단일 파일 경로. modernc.org/sqlite (pure Go, CGO 불필요) 사용 전제
+            # — Dockerfile이 CGO_ENABLED=0 + distroless static이라 mattn/go-sqlite3 호환 X.
+            - name: SQLITE_PATH
+              value: /data/chatbot-alpha-1.db
+          volumeMounts:
+            - name: data
+              mountPath: /data
           resources:
             requests:
               memory: "64Mi"
@@ -39,3 +47,7 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "500m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: chatbot-alpha-1-data

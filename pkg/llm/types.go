@@ -160,6 +160,57 @@ type FreeformResponse struct {
 	Markdown string `json:"markdown" jsonschema_description:"미팅 노트 본문 마크다운. H1 헤더와 참석자/태그 풋터는 포함하지 않는다 (Go가 주입). ## 헤딩부터 시작."`
 }
 
+// =====================================================================
+// Phase 2 — SummarizedContent (정리본 원천, 1회 추출 → 4 포맷 렌더)
+//
+// 거시 디자인 결정 A: "콘텐츠는 1회 추출, 포맷은 N회 변환".
+// 4 포맷 렌더러(decision_status / discussion / role_based / freeform)는
+// 이 struct만 입력으로 받는 순수 함수 — LLM 재호출 없이 즉시 변환된다.
+// 단, freeform은 사용자 directive별 다양성을 위해 별도 LLM 호출 가능.
+//
+// 호출 계약:
+//   - 입력 notes는 Source.IsInCorpus()=true만 (InterimSummary 제외)
+//   - 입력 speakers는 Source.IsAttributionCandidate()=true만 (Human source 발화자만)
+//   - SummaryAction.Origin은 반드시 입력 speakers 안의 username
+// =====================================================================
+
+// SummarizedContent는 미팅 corpus에서 1회 추출한 모든 구조화 사실.
+// JSON으로 직렬화되어 db.summarized_contents.content 컬럼에 저장된다.
+//
+// 4 포맷 렌더 매핑:
+//   - decision_status → Decisions + Done + InProgress + Planned + Blockers + Actions(NextStep으로 변환)
+//   - discussion      → Topics
+//   - role_based      → Actions를 Origin/TargetRoles 기준으로 그룹핑
+//   - freeform        → directive 적용한 LLM 재호출 (또는 Decisions+Topics+Actions 자유 합성)
+type SummarizedContent struct {
+	Decisions     []Decision      `json:"decisions"      jsonschema_description:"결정 (Title + Context). v1.4 규칙."`
+	Done          []string        `json:"done"           jsonschema_description:"완료된 작업/사실."`
+	InProgress    []string        `json:"in_progress"    jsonschema_description:"진행 중."`
+	Planned       []string        `json:"planned"        jsonschema_description:"예정/대기."`
+	Blockers      []string        `json:"blockers"       jsonschema_description:"막힘/이슈/리스크."`
+	Topics        []Topic         `json:"topics"         jsonschema_description:"논의 토픽 (Discussion 포맷용). 시간순 클러스터링."`
+	Actions       []SummaryAction `json:"actions"        jsonschema_description:"확정된 액션 아이템. cross-role(Origin role ≠ Target role) 인식. role_based 렌더는 이 배열을 그룹핑한다."`
+	Shared        []string        `json:"shared"         jsonschema_description:"역할 비귀속 공동 합의/공유사항."`
+	OpenQuestions []string        `json:"open_questions" jsonschema_description:"결정되지 않은 질문. '확인 필요' 접미사."`
+	Tags          []string        `json:"tags"           jsonschema_description:"공백 없는 단일 토큰 태그."`
+}
+
+// SummaryAction은 cross-role 인식을 포함한 단일 액션 아이템.
+//
+// 거시 디자인 결정 5/B: 발화자 role(Origin) ≠ 액션 대상 role(Target)인 경우를 명시 분리.
+// 예: kimjuye(PM)의 "프론트 체크 요청" → Origin=kimjuye, OriginRoles=[PM], TargetRoles=[FRONTEND].
+//
+// 거시 디자인 결정 6 (환각 방어): Origin은 반드시 입력 speakers (Human source 발화자) 안의
+// username이어야 한다. 도구 출력/외부 paste의 author는 Origin이 될 수 없다.
+type SummaryAction struct {
+	What        string   `json:"what"         jsonschema_description:"수행해야 할 작업. 반드시 채워야 한다."`
+	Origin      string   `json:"origin"       jsonschema_description:"액션을 발의한 사람의 Discord username. 반드시 입력 Speakers 목록에 있어야 한다."`
+	OriginRoles []string `json:"origin_roles" jsonschema_description:"발의자의 Discord guild role 라벨 (예: [\"BACKEND\", \"PM\"]). 입력 SpeakerRoles 매핑에서 가져온다."`
+	TargetRoles []string `json:"target_roles" jsonschema_description:"액션 대상 role 그룹. 발의자 본인 작업이면 OriginRoles와 동일. 'FE 체크 요청' 같은 cross-role 발화면 다르다 (예: OriginRoles=[PM], TargetRoles=[FRONTEND]). 빈 배열도 허용 (대상 모호)."`
+	TargetUser  string   `json:"target_user"  jsonschema_description:"특정 개인 지목 시 그 사람의 username. 일반 그룹 대상이면 빈 문자열."`
+	Deadline    string   `json:"deadline"     jsonschema_description:"YYYY-MM-DD 형식 또는 '차주 미팅까지' 같은 한국어 기한. 불명확하면 빈 문자열."`
+}
+
 // WeeklyScope는 주간 정리에서 어떤 데이터를 LLM에 dump할지 식별한다.
 //
 //	WeeklyScopeIssues  — 현재 OPEN 이슈만 (커밋 fetch 생략)

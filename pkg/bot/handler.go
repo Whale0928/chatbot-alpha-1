@@ -9,6 +9,7 @@ import (
 
 	"chatbot-alpha-1/pkg/llm"
 	"chatbot-alpha-1/pkg/llm/render"
+	"chatbot-alpha-1/pkg/llm/summarize"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -47,6 +48,7 @@ func previewRunes(s string, max int) string {
 type Messenger interface {
 	ChannelMessageSend(channelID, content string, opts ...discordgo.RequestOption) (*discordgo.Message, error)
 	ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend, opts ...discordgo.RequestOption) (*discordgo.Message, error)
+	ChannelMessageEdit(channelID, messageID, content string, opts ...discordgo.RequestOption) (*discordgo.Message, error)
 	ChannelMessageDelete(channelID, messageID string, opts ...discordgo.RequestOption) error
 }
 
@@ -68,6 +70,10 @@ type MeetingSummarizer interface {
 	SummarizeFreeform(ctx context.Context, notes []llm.Note, speakers []string, date time.Time, directive string) (*llm.FreeformResponse, error)
 
 	SummarizeInterim(ctx context.Context, notes []llm.Note, speakers []string, date time.Time) (*llm.InterimNoteResponse, error)
+
+	// Phase 2 — SummarizedContent 1회 추출 (정리본 토글의 LLM 호출 단일 진입점).
+	// 후속 4 포맷 렌더는 순수 함수 (LLM 재호출 X — 거시 디자인 결정 A).
+	ExtractContent(ctx context.Context, in summarize.ContentExtractionInput) (*llm.SummarizedContent, error)
 }
 
 // finalizeMeeting은 "미팅 종료" 시 실행되는 핵심 로직.
@@ -92,8 +98,11 @@ func finalizeMeeting(
 	format llm.NoteFormat,
 	directive string,
 ) (keepSession bool) {
-	notes := sess.SnapshotNotes()
-	speakers := sess.SortedSpeakers()
+	// === Phase 1 — corpus·attribution 게이트 ===
+	// SnapshotNotesForCorpus: InterimSummary 제외 (자기 재흡수 방지)
+	// SortedHumanSpeakers: Source=Human 발화자만 (validate 액션 attribution 후보 좁힘)
+	notes := sess.SnapshotNotesForCorpus()
+	speakers := sess.SortedHumanSpeakers()
 
 	directiveRunes := len([]rune(directive))
 	log.Printf("[미팅/finalize] 시작 thread=%s notes=%d speakers=%d format=%s directive_runes=%d",
@@ -224,8 +233,9 @@ func emitInterim(
 	}
 	defer sess.FinishInterim()
 
-	notes := sess.SnapshotNotes()
-	speakers := sess.SortedSpeakers()
+	// === Phase 1 — corpus·attribution 게이트 (finalize와 동일 정책) ===
+	notes := sess.SnapshotNotesForCorpus()
+	speakers := sess.SortedHumanSpeakers()
 
 	if len(notes) == 0 {
 		log.Printf("[미팅/interim] 빈 노트 thread=%s", sess.ThreadID)
@@ -281,6 +291,28 @@ const (
 	customIDFinalizeFreeform       = "finalize_freeform"
 )
 
+// customIDFinalizeSummarized — Phase 2 super-session 모델 정리본 button.
+// 거시 디자인 결정 A: SummarizedContent 1회 추출 후 4 포맷을 동일 메시지에서 토글.
+//
+// Phase 2 chunk 3b: legacy 4 button과 공존 (두 번째 row에 단독 배치).
+// Phase 3+에서 legacy 4 button 폐기 검토.
+//
+// 클릭 동작:
+//   1. PrepareContentExtractionInput으로 corpus 분리
+//   2. summ.ExtractContent (LLM 1회)
+//   3. PersistSummarizedContent (DB)
+//   4. 4 포맷 토글 button이 첨부된 정리본 메시지 전송 (chunk 3c)
+const customIDFinalizeSummarized = "finalize_summarized"
+
+// customIDFormatToggle* — Phase 2 정리본 메시지의 포맷 토글 button (chunk 3c).
+// 클릭 시 메시지 edit으로 포맷 즉시 전환. LLM 재호출 X (DB SummarizedContent → render).
+const (
+	customIDFormatToggleDecisionStatus = "format_toggle_decision_status"
+	customIDFormatToggleDiscussion     = "format_toggle_discussion"
+	customIDFormatToggleRoleBased      = "format_toggle_role_based"
+	customIDFormatToggleFreeform       = "format_toggle_freeform"
+)
+
 // customIDDirectiveBtn은 미팅 종료 prompt의 "추가 요청" 버튼 custom_id.
 // 클릭 시 사용자가 다음 채팅 메시지로 정리 지시를 입력할 수 있는 상태로 전환한다.
 const customIDDirectiveBtn = "directive_btn"
@@ -319,6 +351,12 @@ func finalizePromptComponents() []discordgo.MessageComponent {
 				discordgo.Button{Label: "추가 요청", Style: discordgo.SecondaryButton, CustomID: customIDDirectiveBtn},
 			},
 		},
+		// Phase 2 — 정리본 통합 button (legacy와 공존, 두 번째 row 단독 배치).
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{Label: "정리본 (통합·토글)", Style: discordgo.SuccessButton, CustomID: customIDFinalizeSummarized},
+			},
+		},
 	}
 }
 
@@ -333,6 +371,12 @@ func finalizePromptWithDirectiveComponents() []discordgo.MessageComponent {
 				discordgo.Button{Label: "역할별", Style: discordgo.PrimaryButton, CustomID: customIDFinalizeRoleBased},
 				discordgo.Button{Label: "자율", Style: discordgo.SecondaryButton, CustomID: customIDFinalizeFreeform},
 				discordgo.Button{Label: "지시 다시 입력", Style: discordgo.SecondaryButton, CustomID: customIDDirectiveRetryBtn},
+			},
+		},
+		// Phase 2 — 정리본 통합 button (legacy와 공존, 두 번째 row).
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{Label: "정리본 (통합·토글)", Style: discordgo.SuccessButton, CustomID: customIDFinalizeSummarized},
 			},
 		},
 	}

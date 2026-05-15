@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"chatbot-alpha-1/pkg/llm"
+	"chatbot-alpha-1/pkg/llm/summarize"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -23,23 +25,40 @@ type sentMessage struct {
 type fakeMessenger struct {
 	sent        []sentMessage
 	sentComplex []sentMessage
-	deleted     []string // deleted message IDs (channelID:messageID 형식)
-	nextMsgID   int      // 연속적인 mock 메시지 ID 할당
+	edited      []sentMessage // edited messages (ChannelID/Content + MsgID는 별도)
+	editedIDs   []string      // channelID:messageID 형식
+	deleted     []string      // deleted message IDs (channelID:messageID 형식)
+	nextMsgID   int           // 연속적인 mock 메시지 ID 할당
+	mu          sync.Mutex    // progress goroutine과 동시 접근 보호
 }
 
 func (f *fakeMessenger) ChannelMessageSend(channelID, content string, _ ...discordgo.RequestOption) (*discordgo.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sent = append(f.sent, sentMessage{ChannelID: channelID, Content: content})
 	f.nextMsgID++
 	return &discordgo.Message{ID: fmt.Sprintf("mock-msg-%d", f.nextMsgID)}, nil
 }
 
 func (f *fakeMessenger) ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend, _ ...discordgo.RequestOption) (*discordgo.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sentComplex = append(f.sentComplex, sentMessage{ChannelID: channelID, Content: data.Content})
 	f.nextMsgID++
 	return &discordgo.Message{ID: fmt.Sprintf("mock-msg-%d", f.nextMsgID)}, nil
 }
 
+func (f *fakeMessenger) ChannelMessageEdit(channelID, messageID, content string, _ ...discordgo.RequestOption) (*discordgo.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.edited = append(f.edited, sentMessage{ChannelID: channelID, Content: content})
+	f.editedIDs = append(f.editedIDs, channelID+":"+messageID)
+	return &discordgo.Message{ID: messageID}, nil
+}
+
 func (f *fakeMessenger) ChannelMessageDelete(channelID, messageID string, _ ...discordgo.RequestOption) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, channelID+":"+messageID)
 	return nil
 }
@@ -70,6 +89,12 @@ type fakeSummarizer struct {
 	interimResp  *llm.InterimNoteResponse
 	interimErr   error
 	interimCalls int
+
+	// Phase 2 — ExtractContent
+	extractResp  *llm.SummarizedContent
+	extractErr   error
+	extractCalls int
+	lastExtract  summarize.ContentExtractionInput
 
 	// capture inputs
 	lastNotes     []llm.Note
@@ -121,6 +146,14 @@ func (f *fakeSummarizer) SummarizeInterim(_ context.Context, notes []llm.Note, s
 	f.lastNotes = notes
 	f.lastSpeakers = speakers
 	return f.interimResp, f.interimErr
+}
+
+// ExtractContent는 Phase 2 정리본 1회 추출의 fake 구현.
+// 호출 횟수와 입력 input을 캡처해 테스트가 검증.
+func (f *fakeSummarizer) ExtractContent(_ context.Context, in summarize.ContentExtractionInput) (*llm.SummarizedContent, error) {
+	f.extractCalls++
+	f.lastExtract = in
+	return f.extractResp, f.extractErr
 }
 
 func newTestSession() *Session {
@@ -605,40 +638,59 @@ func Test_formatFromCustomID는_4개_매핑이_정확하다(t *testing.T) {
 	}
 }
 
-func Test_finalizePromptComponents는_4포맷과_추가요청_버튼을_단일행으로_생성한다(t *testing.T) {
+func Test_finalizePromptComponents는_legacy_4포맷과_summarized_button을_2행으로_생성한다(t *testing.T) {
+	// Phase 2 chunk 3b: legacy 4 button + 추가요청 (1행) + summarized 통합 button (2행)
 	comps := finalizePromptComponents()
-	if len(comps) != 1 {
-		t.Fatalf("expected 1 ActionsRow, got %d", len(comps))
+	if len(comps) != 2 {
+		t.Fatalf("expected 2 ActionsRows (legacy + summarized), got %d", len(comps))
 	}
-	row, ok := comps[0].(discordgo.ActionsRow)
+
+	// Row 1: legacy 4 포맷 + 추가 요청 (5 button)
+	row1, ok := comps[0].(discordgo.ActionsRow)
 	if !ok {
-		t.Fatalf("expected ActionsRow, got %T", comps[0])
+		t.Fatalf("expected row[0] ActionsRow, got %T", comps[0])
 	}
-	if len(row.Components) != 5 {
-		t.Errorf("expected 5 buttons, got %d", len(row.Components))
+	if len(row1.Components) != 5 {
+		t.Errorf("row 1 expected 5 buttons, got %d", len(row1.Components))
 	}
-	wantedIDs := map[string]bool{
+	row1IDs := map[string]bool{
 		customIDFinalizeDecisionStatus: false,
 		customIDFinalizeDiscussion:     false,
 		customIDFinalizeRoleBased:      false,
 		customIDFinalizeFreeform:       false,
 		customIDDirectiveBtn:           false,
 	}
-	for _, c := range row.Components {
+	for _, c := range row1.Components {
 		btn, ok := c.(discordgo.Button)
 		if !ok {
-			t.Errorf("expected Button, got %T", c)
+			t.Errorf("row 1: expected Button, got %T", c)
 			continue
 		}
-		if _, exists := wantedIDs[btn.CustomID]; !exists {
-			t.Errorf("unexpected custom_id: %q", btn.CustomID)
+		if _, exists := row1IDs[btn.CustomID]; !exists {
+			t.Errorf("row 1: unexpected custom_id: %q", btn.CustomID)
 		}
-		wantedIDs[btn.CustomID] = true
+		row1IDs[btn.CustomID] = true
 	}
-	for id, seen := range wantedIDs {
+	for id, seen := range row1IDs {
 		if !seen {
-			t.Errorf("missing button with custom_id %q", id)
+			t.Errorf("row 1: missing button with custom_id %q", id)
 		}
+	}
+
+	// Row 2: Phase 2 통합 button 1개
+	row2, ok := comps[1].(discordgo.ActionsRow)
+	if !ok {
+		t.Fatalf("expected row[1] ActionsRow, got %T", comps[1])
+	}
+	if len(row2.Components) != 1 {
+		t.Errorf("row 2 expected 1 button (summarized), got %d", len(row2.Components))
+	}
+	btn, ok := row2.Components[0].(discordgo.Button)
+	if !ok {
+		t.Fatalf("row 2: expected Button, got %T", row2.Components[0])
+	}
+	if btn.CustomID != customIDFinalizeSummarized {
+		t.Errorf("row 2 button CustomID = %q, want %q", btn.CustomID, customIDFinalizeSummarized)
 	}
 }
 

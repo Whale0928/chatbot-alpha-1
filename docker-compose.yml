@@ -1,0 +1,35 @@
+# 로컬 개발용 compose. 운영 배포는 deploy/overlays/production/ (ArgoCD + Kustomize) 사용.
+#
+# 사용법:
+#   1. 프로젝트 루트에 .env 파일 준비 (DISCORD_BOT_TOKEN, GPT_API_KEY 등 — README 참고)
+#   2. docker compose up --build
+#
+# SQLite 데이터는 named volume(chatbot-alpha-1-data)에 보존되며 컨테이너 재시작/재빌드 후에도 유지된다.
+# 데이터 초기화: docker compose down -v
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Dockerfile이 amd64 단일 타겟이지만, 로컬에서 arm64(Apple Silicon)에서도 실행 가능하도록 명시.
+      # 로컬 개발 시에만 빌드 플랫폼을 호스트에 맞추고 싶으면 platform 한 줄을 주석처리하면 된다.
+      platforms:
+        - linux/amd64
+    image: chatbot-alpha-1:local
+    container_name: chatbot-alpha-1
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 컨테이너 내부 SQLite 파일 경로. K8s 배포와 동일하게 /data 마운트 사용.
+      SQLITE_PATH: /data/chatbot-alpha-1.db
+    volumes:
+      - chatbot-alpha-1-data:/data
+    # Discord gateway는 outbound only — 노출 포트 없음.
+    # 향후 metrics/health endpoint 추가 시 여기에 ports 매핑.
+    stop_grace_period: 10s
+
+volumes:
+  chatbot-alpha-1-data:
+    driver: local

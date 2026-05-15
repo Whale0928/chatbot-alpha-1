@@ -1,15 +1,18 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"chatbot-alpha-1/pkg/db"
 	"chatbot-alpha-1/pkg/github"
 	"chatbot-alpha-1/pkg/llm"
 
@@ -53,6 +56,15 @@ type Session struct {
 	Notes     []Note
 	Speakers  map[string]bool
 	UpdatedAt time.Time
+
+	// === Phase 1 추가: super-session 영속화 + role 분류 토대 ===
+	// GuildID: 세션이 속한 Discord guild snowflake. role snapshot/fetch에 필수.
+	// DBSessionID: pkg/db.Session.id (sess_<unix_nano>). DB persist 실패 시 ""로 유지 (in-memory only fallback).
+	// RolesSnapshot: userID → []roleName 매핑. NotesMu 보호. 발화 시점 박제 (lazy 갱신).
+	//                새 발화자 등장 시 GetOrFetchRoles로 1회 fetch + cache 추가.
+	GuildID       string
+	DBSessionID   string
+	RolesSnapshot map[string][]string
 
 	// NoteFormat은 미팅 종료 시 생성할 노트 포맷.
 	// 미팅 시작 시 default(FormatDecisionStatus). 사용자가 종료 시 4 버튼 중
@@ -136,6 +148,11 @@ var (
 	// githubOrg는 ListOrgRepos 대상 organization slug. .env의 GITHUB_ORG에서 읽고
 	// 비었으면 default "bottle-note".
 	githubOrg string
+
+	// dbConn은 SQLite 영속화 핸들. Run에서 부팅 시 Open + Migrate 적용 후 세팅.
+	// Phase 1에서는 단순 글로벌 — 핸들러가 직접 참조한다 (sessions 글로벌과 같은 패턴).
+	// 후속 Phase에서 Bot 구조체로 캡슐화 검토.
+	dbConn *db.DB
 )
 
 // =====================================================================
@@ -182,6 +199,34 @@ func Run(envFile string) error {
 	} else {
 		log.Println("GITHUB_TOKEN 미설정 — 주간 정리 기능 비활성화")
 	}
+
+	// SQLite 영속화 — SQLITE_PATH 미설정 시 default ./data/chatbot-alpha-1.db (로컬 dev 편의).
+	// 운영(K8s)은 deployment.yaml에서 /data/chatbot-alpha-1.db로 강제 설정.
+	// DB 연결 실패는 fatal — 영속화는 Phase 1부터 필수 의존.
+	sqlitePath := os.Getenv("SQLITE_PATH")
+	if sqlitePath == "" {
+		sqlitePath = "data/chatbot-alpha-1.db"
+		log.Printf("[db] SQLITE_PATH 미설정 — default %q 사용 (로컬 dev)", sqlitePath)
+	}
+	if err := ensureParentDir(sqlitePath); err != nil {
+		return fmt.Errorf("SQLite 부모 디렉터리 생성 실패: %w", err)
+	}
+	conn, err := db.Open(sqlitePath)
+	if err != nil {
+		return fmt.Errorf("SQLite 연결 실패 (path=%s): %w", sqlitePath, err)
+	}
+	if err := conn.Migrate(context.Background()); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("SQLite 마이그레이션 실패 (path=%s): %w", sqlitePath, err)
+	}
+	dbConn = conn
+	defer func() {
+		if cerr := dbConn.Close(); cerr != nil {
+			log.Printf("[db] WARN close 실패: %v", cerr)
+		}
+	}()
+	v, _ := dbConn.SchemaVersion(context.Background())
+	log.Printf("[db] SQLite 연결 완료 (path=%s, schema_version=%d)", sqlitePath, v)
 
 	s, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -251,6 +296,9 @@ func cleanupSessions() {
 					mode = "meeting"
 				}
 				log.Printf("[세션/만료] thread=%s mode=%s notes=%d idle=%s", id, mode, len(sess.Notes), now.Sub(sess.UpdatedAt).Round(time.Second))
+				// DB 세션도 CLOSE — idle 만료된 세션이 ACTIVE로 누적되는 것 방지.
+				// best-effort, 실패 시 log warn은 persistSessionClose 내부에서.
+				persistSessionClose(context.Background(), sess)
 				delete(sessions, id)
 			}
 		}
@@ -274,6 +322,17 @@ func loadEnvWithLog(envFile string) {
 		return
 	}
 	log.Printf("[env] %s 로드 완료 (cwd=%s)", target, cwd)
+}
+
+// ensureParentDir은 path의 부모 디렉터리가 없으면 0755로 생성한다.
+// SQLITE_PATH가 "data/chatbot-alpha-1.db" 같이 로컬 상대 경로일 때 첫 부팅 안내.
+// K8s에서는 PVC가 이미 /data로 마운트되어 있으므로 사실상 noop.
+func ensureParentDir(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "" || dir == "." || dir == "/" {
+		return nil
+	}
+	return os.MkdirAll(dir, 0o755)
 }
 
 func truncate(s string, maxLen int) string {

@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chatbot-alpha-1-data
+  namespace: chatbot-alpha-1
+  labels:
+    app: chatbot-alpha-1
+    environment: production
+spec:
+  # ReadWriteOnce — Discord 봇은 단일 Gateway 세션 보장 (replicas: 1, Recreate)이므로
+  # SQLite의 single-writer 제약과 정확히 부합한다. RWO로 충분.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # 5-20인 팀 운영 데이터 보존: sessions/notes/segments/finalizes 4테이블 기준
+      # 1년치 미팅 노트 누적 시에도 100Mi 미만 예상. 1Gi는 여유 + 인덱스 + 미래 확장 마진.
+      storage: 1Gi
+  # storageClassName 미지정 → 클러스터 default storageClass 사용
+  # (homelab pve-pod 환경 default 그대로)

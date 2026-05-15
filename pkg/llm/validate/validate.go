@@ -8,6 +8,39 @@ import (
 	"chatbot-alpha-1/pkg/llm"
 )
 
+// AgainstSummarizedContent는 SummarizedContent의 actions가 환각인지 1차 검증한다.
+// 실패해도 에러 반환 안 함 — log.Printf로 경고만 (호출자가 막을지 결정).
+//
+// 검증:
+//   - actions[].origin: speakers 목록(Human source 발화자만)에 있는지
+//     없으면 LLM이 ContextNotes author나 외부 인물을 잘못 attribute한 환각 의심
+//   - actions[].what: 원본 corpus와 최소 1개 의미 토큰 겹침
+//
+// 호출 계약:
+//   notes는 HumanNotes + ContextNotes 합집합 (corpus 검증용 — 모든 텍스트 포함)
+//   speakers는 Human source 발화자만 (attribution 후보 — pkg/bot의 SortedHumanSpeakers)
+func AgainstSummarizedContent(sc *llm.SummarizedContent, notes []llm.Note, speakers []string) {
+	if sc == nil {
+		return
+	}
+	corpus := buildNoteCorpus(notes)
+	speakerSet := make(map[string]bool, len(speakers))
+	for _, s := range speakers {
+		speakerSet[strings.ToLower(s)] = true
+	}
+	for i, a := range sc.Actions {
+		if a.Origin != "" && !speakerSet[strings.ToLower(a.Origin)] {
+			log.Printf("[llm/validate] WARN summarized.actions[%d].origin=%q는 Human speakers 목록에 없습니다 (환각 의심 — ContextNotes author일 가능성)", i, a.Origin)
+		}
+		if a.What != "" && !hasAnyTokenOverlap(a.What, corpus) {
+			log.Printf("[llm/validate] WARN summarized.actions[%d].what 토큰 겹침 없음: %q", i, a.What)
+		}
+		if a.TargetUser != "" && !speakerSet[strings.ToLower(a.TargetUser)] {
+			log.Printf("[llm/validate] WARN summarized.actions[%d].target_user=%q는 Human speakers 목록에 없습니다", i, a.TargetUser)
+		}
+	}
+}
+
 // AgainstNotes는 LLM이 생성한 llm.FinalNoteResponse의 각 항목이
 // 원본 notes에 근거하는지 substring 수준으로 검증한다.
 //
@@ -16,6 +49,14 @@ import (
 //   - Discussion 각 bullet: 본문이 notes 중 어느 하나와 최소 1개 의미 토큰 겹침
 //   - llm.NextStep.What: 위와 동일
 //   - llm.NextStep.Who: speakers 목록에 있는지 (있지 않아도 허용하되 경고)
+//
+// === 호출 계약 (Phase 1) ===
+// 호출자(pkg/bot)는 다음을 보장해야 한다:
+//   - notes:    Source.IsInCorpus()=true 항목만 (InterimSummary 제외)
+//   - speakers: Source.IsAttributionCandidate()=true 발화자만 (Human source만)
+// 이 좁힘으로 WeeklyDump/ExternalPaste paste가 발화자 액션으로 잘못 attribute되는
+// 환각 케이스(거시 디자인 결정 6)를 SQL 단계에서 미리 차단한다. validate는 단순히
+// "speakers 안에 있으면 OK"만 체크하므로 호출자의 좁힘이 정책의 실효를 보장한다.
 func AgainstNotes(note *llm.FinalNoteResponse, notes []llm.Note, speakers []string) {
 	if note == nil {
 		return

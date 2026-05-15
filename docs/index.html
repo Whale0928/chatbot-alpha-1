@@ -1,0 +1,1292 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>chatbot-alpha-1 · Super-Session Walkthrough</title>
+<style>
+  :root {
+    /* Discord-ish palette */
+    --bg-page: #1e2125;
+    --bg-channel: #313338;
+    --bg-message-hover: #2e3035;
+    --bg-sidebar: #2b2d31;
+    --bg-elevated: #383a40;
+    --bg-input: #383a40;
+    --bg-embed: #2b2d31;
+    --bg-button: #4e5058;
+    --bg-button-primary: #5865f2;
+    --bg-button-success: #248046;
+    --bg-button-danger: #da373c;
+    --border: #3f4147;
+    --border-strong: #4e5058;
+    --text: #f2f3f5;
+    --text-dim: #b5bac1;
+    --text-muted: #80848e;
+    --text-link: #00a8fc;
+    --accent: #5865f2;
+    --good: #23a559;
+    --warn: #f0b232;
+    --danger: #f23f43;
+    --role-be: #f47fff;     /* purple-pink */
+    --role-fe: #5fb3f5;     /* blue */
+    --role-pm: #f0b232;     /* yellow */
+    --bot-tag: #5865f2;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: "gg sans", "Pretendard", -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg-page);
+    color: var(--text);
+    line-height: 1.45;
+    font-size: 15px;
+  }
+
+  /* ============ LAYOUT ============ */
+  .app { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
+  .sidebar {
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    padding: 24px 16px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+  }
+  .sidebar h1 {
+    font-size: 14px;
+    color: var(--text);
+    margin-bottom: 4px;
+    font-weight: 700;
+  }
+  .sidebar .sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 20px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .toc { display: flex; flex-direction: column; gap: 2px; }
+  .toc a {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-radius: 4px;
+    color: var(--text-dim); text-decoration: none;
+    font-size: 13.5px;
+    transition: background 0.1s;
+  }
+  .toc a:hover { background: var(--bg-elevated); color: var(--text); }
+  .toc a .num { color: var(--text-muted); font-family: "JetBrains Mono", monospace; font-size: 11px; min-width: 20px; }
+  .toc .divider { height: 1px; background: var(--border); margin: 12px 0 8px; }
+  .toc-section {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 4px 10px;
+    margin-top: 8px;
+  }
+
+  .main { background: var(--bg-channel); }
+
+  /* ============ HEADER ============ */
+  .channel-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-channel);
+    position: sticky; top: 0; z-index: 10;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.2);
+  }
+  .channel-header .hash { color: var(--text-muted); font-size: 22px; }
+  .channel-header .name { font-weight: 700; font-size: 16px; }
+  .channel-header .topic { color: var(--text-muted); font-size: 13px; padding-left: 12px; border-left: 1px solid var(--border); margin-left: 12px; }
+
+  /* ============ SCENE ============ */
+  .scene {
+    padding: 32px 0 24px;
+    border-bottom: 1px solid var(--border);
+    scroll-margin-top: 60px;
+  }
+  .scene-meta {
+    padding: 0 24px 16px;
+    display: flex; align-items: baseline; gap: 12px;
+  }
+  .scene-meta .scene-num {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+    background: var(--bg-elevated);
+    color: var(--accent);
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-weight: 700;
+  }
+  .scene-meta .scene-title { font-size: 18px; font-weight: 700; color: var(--text); }
+  .scene-caption {
+    margin: 0 24px 16px;
+    padding: 12px 16px;
+    background: rgba(88, 101, 242, 0.08);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .scene-caption strong { color: var(--text); }
+  .scene-caption .principle { color: var(--accent); font-weight: 600; }
+
+  /* ============ MESSAGE (Discord-like) ============ */
+  .msg {
+    display: grid;
+    grid-template-columns: 56px 1fr;
+    padding: 4px 24px;
+    transition: background 0.1s;
+  }
+  .msg:hover { background: var(--bg-message-hover); }
+  .msg.first-of-group { padding-top: 16px; }
+  .msg .avatar {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--bg-elevated);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 14px;
+    color: var(--text);
+  }
+  .msg .avatar.bot { background: var(--bot-tag); }
+  .msg .avatar.kimjuye { background: #f0b232; color: #1e2125; }
+  .msg .avatar.deadwhale { background: #f47fff; color: #1e2125; }
+  .msg .avatar.hyejung { background: #5fb3f5; color: #1e2125; }
+  .msg.continuation .avatar { visibility: hidden; }
+
+  .msg-body { min-width: 0; }
+  .msg-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+  .msg-header .author { font-weight: 600; color: var(--text); font-size: 15px; }
+  .msg-header .author.kimjuye { color: var(--role-pm); }
+  .msg-header .author.deadwhale { color: var(--role-be); }
+  .msg-header .author.hyejung { color: var(--role-fe); }
+  .role-badge {
+    display: inline-block;
+    font-size: 10px; font-weight: 700;
+    padding: 1px 6px; border-radius: 3px;
+    margin-left: 2px; letter-spacing: 0.3px;
+  }
+  .role-badge.be { background: rgba(244, 127, 255, 0.15); color: var(--role-be); }
+  .role-badge.fe { background: rgba(95, 179, 245, 0.15); color: var(--role-fe); }
+  .role-badge.pm { background: rgba(240, 178, 50, 0.15); color: var(--role-pm); }
+  .bot-tag {
+    background: var(--bot-tag); color: white;
+    font-size: 10px; padding: 1px 5px; border-radius: 3px;
+    font-weight: 700; letter-spacing: 0.3px;
+    vertical-align: middle;
+  }
+  .msg-time { color: var(--text-muted); font-size: 12px; }
+  .msg-content { color: var(--text); font-size: 15px; white-space: pre-wrap; }
+  .msg-content code {
+    background: var(--bg-page); padding: 1px 5px;
+    border-radius: 3px; font-family: "JetBrains Mono", monospace;
+    font-size: 12.5px;
+  }
+  .slash-command {
+    background: var(--bg-page); color: var(--text-link);
+    padding: 1px 6px; border-radius: 3px;
+    font-family: "JetBrains Mono", monospace; font-size: 13px;
+  }
+  .mention {
+    background: rgba(88, 101, 242, 0.3); color: #c9cdfb;
+    padding: 0 3px; border-radius: 3px;
+  }
+
+  /* ============ EMBED / SYSTEM CARDS ============ */
+  .embed {
+    margin: 6px 0 4px;
+    background: var(--bg-embed);
+    border-left: 4px solid var(--accent);
+    border-radius: 4px;
+    padding: 12px 16px;
+    max-width: 640px;
+  }
+  .embed.success { border-left-color: var(--good); }
+  .embed.warn { border-left-color: var(--warn); }
+  .embed.danger { border-left-color: var(--danger); }
+  .embed.tool { border-left-color: var(--role-fe); }
+  .embed-title { font-weight: 700; font-size: 14px; margin-bottom: 6px; color: var(--text); }
+  .embed-body { font-size: 13.5px; color: var(--text-dim); }
+  .embed-body strong { color: var(--text); }
+  .embed-meta { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--text-muted); padding-top: 8px; border-top: 1px solid var(--border); }
+
+  /* ============ STICKY BUTTONS ============ */
+  .button-row {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin-top: 8px;
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 14px;
+    border-radius: 4px;
+    font-size: 13px; font-weight: 500;
+    background: var(--bg-button); color: var(--text);
+    border: none; cursor: pointer;
+    transition: filter 0.1s;
+  }
+  .btn:hover { filter: brightness(1.15); }
+  .btn.primary { background: var(--bg-button-primary); }
+  .btn.success { background: var(--bg-button-success); }
+  .btn.danger { background: var(--bg-button-danger); }
+  .btn.active { box-shadow: inset 0 0 0 2px var(--text); }
+
+  /* ============ SOURCE TAG ============ */
+  .source-tag {
+    display: inline-block;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px; font-weight: 700;
+    padding: 1px 6px; border-radius: 3px;
+    margin-left: 6px; vertical-align: middle;
+  }
+  .source-tag.human { background: rgba(35, 165, 89, 0.15); color: var(--good); }
+  .source-tag.weekly { background: rgba(95, 179, 245, 0.15); color: var(--role-fe); }
+  .source-tag.release { background: rgba(244, 127, 255, 0.15); color: var(--role-be); }
+  .source-tag.external { background: rgba(240, 178, 50, 0.15); color: var(--warn); }
+  .source-tag.interim { background: rgba(128, 132, 142, 0.2); color: var(--text-muted); }
+
+  /* ============ SUMMARIZED CONTENT MOCK ============ */
+  .summarized {
+    margin: 12px 0;
+    background: var(--bg-embed);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    max-width: 720px;
+  }
+  .summarized .summarized-head {
+    background: var(--bg-elevated);
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .summarized .summarized-head .title { font-weight: 700; font-size: 14px; }
+  .summarized .summarized-head .extracted { font-size: 11px; color: var(--text-muted); font-family: "JetBrains Mono", monospace; }
+  .format-tabs {
+    display: flex; gap: 4px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-channel);
+  }
+  .format-tabs .tab {
+    padding: 5px 12px; border-radius: 4px;
+    font-size: 12.5px; cursor: pointer;
+    background: transparent; color: var(--text-dim);
+    border: 1px solid transparent;
+    transition: all 0.1s;
+  }
+  .format-tabs .tab:hover { background: var(--bg-elevated); color: var(--text); }
+  .format-tabs .tab.active { background: var(--bg-button-primary); color: white; }
+  .format-tabs .badge {
+    margin-left: auto;
+    font-size: 10.5px; color: var(--good);
+    background: rgba(35, 165, 89, 0.1); padding: 4px 10px;
+    border-radius: 4px; font-weight: 600;
+    align-self: center;
+  }
+  .summarized-toolbar {
+    display: flex; gap: 6px;
+    padding: 8px 12px;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+  }
+  .summarized-toolbar .view-toggle {
+    display: flex; gap: 2px;
+    background: var(--bg-channel); border-radius: 4px; padding: 2px;
+  }
+  .summarized-toolbar .view-toggle button {
+    background: transparent; border: none; cursor: pointer;
+    color: var(--text-dim); padding: 4px 12px;
+    font-size: 12px; border-radius: 3px;
+    font-weight: 500;
+  }
+  .summarized-toolbar .view-toggle button.active {
+    background: var(--bg-button-primary); color: white;
+  }
+  .summarized-toolbar .copy-btn {
+    margin-left: auto;
+    background: var(--bg-button); color: var(--text);
+    border: none; cursor: pointer;
+    padding: 4px 14px; border-radius: 4px;
+    font-size: 12px; font-weight: 500;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .summarized-toolbar .copy-btn:hover { filter: brightness(1.15); }
+  .summarized-toolbar .copy-btn.copied { background: var(--good); }
+
+  /* corpus view (원본 보기) */
+  .corpus-view {
+    padding: 16px 20px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    max-height: 480px;
+    overflow-y: auto;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    line-height: 1.6;
+  }
+  .corpus-view .corpus-note {
+    padding: 8px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .corpus-view .corpus-note:last-child { border-bottom: none; }
+  .corpus-view .corpus-meta {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 4px;
+    font-size: 11px;
+  }
+  .corpus-view .corpus-meta .ts { color: var(--text-muted); }
+  .corpus-view .corpus-meta .author { color: var(--text); font-weight: 600; }
+  .corpus-view .corpus-body {
+    color: var(--text); white-space: pre-wrap;
+    padding-left: 4px;
+  }
+  .corpus-view .corpus-body.dimmed {
+    color: var(--text-muted); font-style: italic;
+  }
+  .corpus-stats {
+    margin-top: 14px; padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-muted);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .summarized-content {
+    padding: 16px 20px;
+    font-size: 13.5px;
+    color: var(--text-dim);
+    max-height: 480px;
+    overflow-y: auto;
+  }
+  .summarized-content h4 {
+    color: var(--text); font-size: 13.5px;
+    margin: 14px 0 6px; font-weight: 700;
+  }
+  .summarized-content h4:first-child { margin-top: 0; }
+  .summarized-content ul { padding-left: 22px; margin: 4px 0 8px; }
+  .summarized-content li { margin: 3px 0; line-height: 1.55; }
+  .summarized-content .role-group {
+    margin: 12px 0; padding: 10px 14px;
+    background: var(--bg-channel); border-radius: 4px;
+    border-left: 3px solid var(--accent);
+  }
+  .summarized-content .role-group.be { border-left-color: var(--role-be); }
+  .summarized-content .role-group.fe { border-left-color: var(--role-fe); }
+  .summarized-content .role-group.pm { border-left-color: var(--role-pm); }
+  .summarized-content .role-group .role-name {
+    font-weight: 700; font-size: 13px;
+    color: var(--text); margin-bottom: 6px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .summarized-content .role-group .members {
+    font-size: 11px; color: var(--text-muted); font-weight: 400;
+  }
+  .summarized-content .sub-section {
+    margin: 6px 0; font-size: 12px;
+  }
+  .summarized-content .sub-section .label {
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10.5px;
+    font-weight: 700;
+    margin-bottom: 2px;
+  }
+  .summarized-content .sub-section .item {
+    padding-left: 12px; color: var(--text-dim);
+  }
+  .summarized-content .from-tag {
+    display: inline-block; font-size: 10px;
+    color: var(--text-muted); font-family: "JetBrains Mono", monospace;
+    margin-left: 6px;
+  }
+
+  /* ============ CALLOUT (validate detected) ============ */
+  .callout {
+    margin: 8px 0;
+    padding: 10px 14px;
+    background: rgba(35, 165, 89, 0.08);
+    border: 1px dashed var(--good);
+    border-radius: 4px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    max-width: 640px;
+  }
+  .callout strong { color: var(--good); }
+  .callout.warn { background: rgba(240, 178, 50, 0.08); border-color: var(--warn); }
+  .callout.warn strong { color: var(--warn); }
+
+  /* ============ FOOTER PANELS ============ */
+  .epilogue {
+    padding: 40px 24px;
+    background: var(--bg-page);
+  }
+  .epilogue h2 {
+    font-size: 18px; margin-bottom: 16px;
+    color: var(--text);
+  }
+  .principle-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    margin-bottom: 24px;
+  }
+  .principle-card {
+    background: var(--bg-channel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+  }
+  .principle-card .num {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--accent); font-weight: 700; font-size: 13px;
+  }
+  .principle-card .title {
+    font-weight: 700; margin: 4px 0 8px;
+    color: var(--text); font-size: 14px;
+  }
+  .principle-card .desc {
+    font-size: 12.5px; color: var(--text-dim);
+  }
+  .footer-note {
+    margin-top: 20px; padding: 14px;
+    background: var(--bg-channel); border-radius: 6px;
+    font-size: 12px; color: var(--text-muted);
+    text-align: center;
+  }
+
+  /* ============ THREAD SEPARATOR ============ */
+  .thread-line {
+    display: flex; align-items: center; gap: 12px;
+    margin: 16px 24px 0;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .thread-line::before, .thread-line::after {
+    content: ""; flex: 1; height: 1px; background: var(--border);
+  }
+
+  /* ============ Discord input bar (decorative) ============ */
+  .input-bar {
+    padding: 12px 24px 20px;
+    background: var(--bg-channel);
+  }
+  .input-bar .input {
+    background: var(--bg-input);
+    padding: 12px 16px;
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 14px;
+  }
+
+  /* ============ Responsive ============ */
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 1fr; }
+    .sidebar { position: relative; height: auto; }
+    .principle-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="sidebar">
+    <h1>chatbot-alpha-1</h1>
+    <div class="sub">Super-Session · Walkthrough</div>
+
+    <div class="toc">
+      <div class="toc-section">시나리오 (5/14 미팅 재현)</div>
+      <a href="#scene-1"><span class="num">01</span> 메인 채널 진입</a>
+      <a href="#scene-2"><span class="num">02</span> 세션 OPEN</a>
+      <a href="#scene-3"><span class="num">03</span> 자유 발화 누적</a>
+      <a href="#scene-4"><span class="num">04</span> 주간 리포트 호출</a>
+      <a href="#scene-5"><span class="num">05</span> 외부 paste 자동 분류</a>
+      <a href="#scene-6"><span class="num">06</span> Cross-role 액션</a>
+      <a href="#scene-7"><span class="num">07</span> 중간 요약 (interim)</a>
+      <a href="#scene-8"><span class="num">08</span> 노트 정리 — 추출</a>
+      <a href="#scene-9"><span class="num">09</span> 포맷 토글</a>
+      <a href="#scene-10"><span class="num">10</span> 세션 종료</a>
+      <div class="divider"></div>
+      <a href="#epilogue"><span class="num">★</span> 3원칙 정리</a>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main class="main">
+
+    <!-- channel header -->
+    <div class="channel-header">
+      <span class="hash">#</span>
+      <span class="name">팀-운영</span>
+      <span class="topic">5/14(목) 정기 운영 미팅 — Super-session 시연</span>
+    </div>
+
+    <!-- =================== SCENE 1 =================== -->
+    <section class="scene" id="scene-1">
+      <div class="scene-meta">
+        <span class="scene-num">SCENE 01</span>
+        <span class="scene-title">메인 채널 진입 — 슬래시 호출</span>
+      </div>
+      <div class="scene-caption">
+        <strong>kimjuye</strong>가 <code>/meeting</code>으로 미팅을 연다. 어떤 슬래시(<code>/meeting · /weekly · /release · /agent · /session</code>)든 도착 후엔 동일한 super-session.
+        <span class="principle">[원칙 01] 진입은 다양, 컨텍스트는 하나.</span>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar kimjuye">K</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author kimjuye">kimjuye</span>
+            <span class="role-badge pm">PM</span>
+            <span class="msg-time">오늘 오후 7:55</span>
+          </div>
+          <div class="msg-content"><span class="slash-command">/meeting</span></div>
+        </div>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar bot">B</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author">ChatBot-Alpha-1</span>
+            <span class="bot-tag">앱</span>
+            <span class="msg-time">오늘 오후 7:55 · 본인만 보임</span>
+          </div>
+          <div class="msg-content">미팅 스레드를 만들었어요 → <a href="#scene-2" style="color: var(--text-link);">#미팅 5/14</a></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== SCENE 2 =================== -->
+    <section class="scene" id="scene-2">
+      <div class="scene-meta">
+        <span class="scene-num">SCENE 02</span>
+        <span class="scene-title">세션 OPEN — 스레드 생성, role snapshot 적재</span>
+      </div>
+      <div class="scene-caption">
+        세션 OPEN 시점에 봇은 Discord guild role을 <strong>snapshot</strong>으로 적재한다. 이후 발화의 <code>AuthorRoles</code>는 이 시점 기준으로 고정 — 미팅 도중 role이 바뀌어도 미팅 출력은 일관됨.
+        <span class="principle">[원칙 01] 세션 = 컨테이너, 종료까지 동일 컨텍스트.</span>
+      </div>
+
+      <div class="thread-line">스레드 시작 · #미팅 5/14</div>
+
+      <div class="msg first-of-group">
+        <div class="avatar bot">B</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author">ChatBot-Alpha-1</span>
+            <span class="bot-tag">앱</span>
+            <span class="msg-time">오늘 오후 7:55</span>
+          </div>
+          <div class="msg-content">미팅을 시작합니다. 자유롭게 입력하세요.</div>
+          <div class="embed success">
+            <div class="embed-title">세션 OPEN · 워크스페이스 적재 완료</div>
+            <div class="embed-body">
+              참석자 role snapshot:<br/>
+              · <strong>kimjuye</strong> <span class="role-badge pm">PM</span><br/>
+              · <strong>deadwhale</strong> <span class="role-badge be">BACKEND</span><br/>
+              · <strong>hyejungpark</strong> <span class="role-badge fe">FRONTEND</span>
+            </div>
+            <div class="embed-meta">
+              <span>guildID: 9821...</span>
+              <span>session: sess_5o2p</span>
+              <span>state: ACTIVE</span>
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="btn primary">중간 요약</button>
+            <button class="btn">주간 추가</button>
+            <button class="btn">릴리즈 추가</button>
+            <button class="btn">에이전트</button>
+            <button class="btn primary">노트 정리</button>
+            <button class="btn danger">세션 종료</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== SCENE 3 =================== -->
+    <section class="scene" id="scene-3">
+      <div class="scene-meta">
+        <span class="scene-num">SCENE 03</span>
+        <span class="scene-title">자유 발화 누적 — Source = Human</span>
+      </div>
+      <div class="scene-caption">
+        모든 발화는 <code>NoteSource=Human</code>으로 적재되며 <code>AuthorRoles</code>가 함께 박힌다. role-based 렌더링이 LLM 추측 없이 ground truth로 가능해지는 토대.
+        <span class="principle">[원칙 02] 모든 데이터에 Source 라벨.</span>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar kimjuye">K</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author kimjuye">kimjuye</span>
+            <span class="role-badge pm">PM</span>
+            <span class="msg-time">오후 7:58</span>
+          </div>
+          <div class="msg-content">workspace 이슈에 기획제안성, 정책성 이슈 통합 처리
+예) 이슈155, 이슈170 등 취합 정리.
+바 정보 관련 157, 170, 195등 연관 이슈를 하나로 묶어서 정리.
+5월 15일에 정리할 예정 <span class="source-tag human">Human · PM</span></div>
+        </div>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar kimjuye">K</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author kimjuye">kimjuye</span>
+            <span class="role-badge pm">PM</span>
+            <span class="msg-time">오후 7:59</span>
+          </div>
+          <div class="msg-content">위스키 캐스크정보 업데이트 90%완료 다음 미팅까지 완료예정 <span class="source-tag human">Human · PM</span></div>
+        </div>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar deadwhale">D</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author deadwhale">deadwhale</span>
+            <span class="role-badge be">BACKEND</span>
+            <span class="msg-time">오후 8:01</span>
+          </div>
+          <div class="msg-content">큐레이션 알코올스 계열들에서 order 제어 기능 필요. 생성에는 있는데 수정 등에서는 없음. 큐레이션 관리자 기능으로서 order spec 확장이 필요함. <span class="source-tag human">Human · BE</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== SCENE 4 =================== -->
+    <section class="scene" id="scene-4">
+      <div class="scene-meta">
+        <span class="scene-num">SCENE 04</span>
+        <span class="scene-title">주간 리포트 호출 — Segment + Source = WeeklyDump</span>
+      </div>
+      <div class="scene-caption">
+        <strong>deadwhale</strong>이 [주간 추가] 클릭 → 같은 스레드에서 git-bot 결과가 <strong>Segment</strong>로 누적된다. 결과는 <code>NoteSource=WeeklyDump</code>로 표시되어 <strong>action attribution 후보에서 제외</strong> — 이전 환각의 원인을 구조적으로 차단.
+        <span class="principle">[원칙 03] sub-action은 컨텍스트를 깨지 않는다.</span>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar deadwhale">D</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author deadwhale">deadwhale</span>
+            <span class="role-badge be">BACKEND</span>
+            <span class="msg-time">오후 8:03</span>
+          </div>
+          <div class="msg-content">[주간 추가 클릭]</div>
+        </div>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar bot">B</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author">ChatBot-Alpha-1</span>
+            <span class="bot-tag">앱</span>
+            <span class="msg-time">오후 8:03</span>
+          </div>
+          <div class="embed tool">
+            <div class="embed-title">Segment 시작 · weekly_summary <span class="source-tag weekly">WeeklyDump</span></div>
+            <div class="embed-body">
+              <strong>레포</strong>: bottle-note/bottle-note-api-server<br/>
+              <strong>윈도우</strong>: 2026-04-30 ~ 2026-05-14<br/>
+              <strong>한 줄</strong>: 어드민 기준정보 API 확장과 정렬 필드 표준화가 가장 활발.<br/><br/>
+              <strong>주요 활동</strong><br/>
+              · 어드민 증류소 CRUD API 추가, 이미지 S3 URL 전환<br/>
+              · sortOrder 입력/응답 보강, 카테고리 레퍼런스 grouped 변경<br/>
+              · 푸시 기능 제거 완료<br/><br/>
+              <strong>다음 주 우선순위 추천</strong><br/>
+              · 어드민 증류소/지역 API 회귀 검증<br/>
+              · 클라이언트 응답 스키마 호환성 점검<br/>
+              · 배포 파이프라인·운영 설정 점검
+            </div>
+            <div class="embed-meta">
+              <span>segment: seg_w1</span>
+              <span>커밋 37건</span>
+              <span>open 이슈 0</span>
+            </div>
+          </div>
+          <div class="callout">
+            <strong>[validate]</strong> 이 segment의 모든 노트는 <code>Source=WeeklyDump</code>. 후속 finalize에서 액션 attribution 후보로 사용되지 <strong>않음</strong> — 누구의 액션도 아닌 시스템 출력.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== SCENE 5 =================== -->
+    <section class="scene" id="scene-5">
+      <div class="scene-meta">
+        <span class="scene-num">SCENE 05</span>
+        <span class="scene-title">외부 paste 자동 분류 — Source = ExternalPaste</span>
+      </div>
+      <div class="scene-caption">
+        사용자가 외부 텍스트를 직접 붙여넣었을 때(예: 다른 채널 회의록 일부). <strong>자동(길이 임계)</strong> + <strong>명시적 [외부 자료 첨부] 버튼</strong> 둘 다 작동. corpus엔 들어가지만 attribution 후보엔 제외.
+        <span class="principle">[원칙 02] 발화 ≠ 도구 결과 ≠ 외부 자료. 라벨로 구분.</span>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar hyejung">H</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author hyejung">hyejungpark</span>
+            <span class="role-badge fe">FRONTEND</span>
+            <span class="msg-time">오후 8:04</span>
+          </div>
+          <div class="msg-content">[다른 미팅 회의록에서 320줄 paste]</div>
+        </div>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar bot">B</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author">ChatBot-Alpha-1</span>
+            <span class="bot-tag">앱</span>
+            <span class="msg-time">오후 8:04 · 본인만 보임</span>
+          </div>
+          <div class="embed warn">
+            <div class="embed-title">대용량 paste 감지 · 자동 분류 <span class="source-tag external">ExternalPaste</span></div>
+            <div class="embed-body">
+              <strong>320줄</strong> (임계 500자 초과)을 외부 자료로 자동 분류했어요.<br/>
+              본인 발화로 처리하려면 [발화로 변경]을 눌러주세요.
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="btn">발화로 변경</button>
+            <button class="btn primary">유지 (외부 자료)</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== SCENE 6 =================== -->
+    <section class="scene" id="scene-6">
+      <div class="scene-meta">
+        <span class="scene-num">SCENE 06</span>
+        <span class="scene-title">Cross-role 액션 발화 — TargetRoles 인식</span>
+      </div>
+      <div class="scene-caption">
+        <strong>kimjuye(PM)</strong>가 FE에게 던진 요청. 발화자 role(PM) ≠ 액션 대상 role(FE). 봇이 <code>Action.TargetRoles=["FE"]</code>로 분리 저장 → role-based 렌더에서 FE 그룹의 <strong>"받은 요청"</strong> 섹션에 등장.
+        <span class="principle">[원칙 02 + B 보완] 발화자와 대상은 다르다.</span>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar kimjuye">K</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author kimjuye">kimjuye</span>
+            <span class="role-badge pm">PM</span>
+            <span class="msg-time">오후 8:13</span>
+          </div>
+          <div class="msg-content">차주 미팅까지 깃허브 이슈 206, 207, 208 프론트엔드 체크 요청 <span class="source-tag human">Human · PM</span></div>
+          <div class="callout">
+            <strong>[detected]</strong> Cross-role 요청 감지 — origin: <span class="role-badge pm">PM</span> kimjuye → target: <span class="role-badge fe">FE</span> 그룹. deadline: 2026-05-21.
+          </div>
+        </div>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar deadwhale">D</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author deadwhale">deadwhale</span>
+            <span class="role-badge be">BACKEND</span>
+            <span class="msg-time">오후 8:14</span>
+          </div>
+          <div class="msg-content">백엔드는 차주 큐레이션 커스텀 스펙 구현 필요 <span class="source-tag human">Human · BE</span></div>
+          <div class="callout">
+            <strong>[detected]</strong> 자기 발의 — origin: <span class="role-badge be">BE</span> → target: <span class="role-badge be">BE</span> 그룹. (FE 그룹엔 노출 안 됨)
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== SCENE 7 =================== -->
+    <section class="scene" id="scene-7">
+      <div class="scene-meta">
+        <span class="scene-num">SCENE 07</span>
+        <span class="scene-title">중간 요약 (interim) — corpus 재흡수 방지</span>
+      </div>
+      <div class="scene-caption">
+        [중간 요약]은 도구. interim 결과는 <code>Source=InterimSummary</code>로 표시되며 <strong>이후 finalize의 corpus에서 제외</strong> — 자기 자신을 데이터로 흡수하는 무한 재귀 차단.
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar bot">B</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author">ChatBot-Alpha-1</span>
+            <span class="bot-tag">앱</span>
+            <span class="msg-time">오후 8:11</span>
+          </div>
+          <div class="embed">
+            <div class="embed-title">현재까지 미팅 정리 · 11:11:05 <span class="source-tag interim">InterimSummary</span></div>
+            <div class="embed-body">
+              <strong>지금까지 나온 결정</strong><br/>
+              · workspace 통합 이슈 정리 (5/15 예정)<br/>
+              · 채용 공고글 재업로드<br/>
+              · 위스키 캐스크정보 90% 완료, 다음 미팅까지 완료 예정<br/>
+              · 큐레이션 order spec 확장 필요<br/><br/>
+              <strong>확인 필요</strong><br/>
+              · order spec 적용 범위<br/>
+              · workspace 통합 이슈의 묶음 기준
+            </div>
+            <div class="embed-meta"><span>elapsed: 1m 23s · 첫 발화 이후</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== SCENE 8 =================== -->
+    <section class="scene" id="scene-8">
+      <div class="scene-meta">
+        <span class="scene-num">SCENE 08</span>
+        <span class="scene-title">노트 정리 — SummarizedContent 1회 추출</span>
+      </div>
+      <div class="scene-caption">
+        [노트 정리] 클릭. 봇이 LLM 호출로 <strong>SummarizedContent</strong>(구조화된 사실)를 <strong>1회만</strong> 추출. 이게 모든 포맷의 source of truth.
+        <span class="principle">[원칙 03 + A 결정] 콘텐츠는 1회, 포맷은 N회.</span>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar bot">B</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author">ChatBot-Alpha-1</span>
+            <span class="bot-tag">앱</span>
+            <span class="msg-time">오후 8:16</span>
+          </div>
+          <div class="msg-content">정리본을 추출 중입니다...</div>
+          <div class="callout">
+            <strong>[extract]</strong> corpus = Human(11) + WeeklyDump(1) + ExternalPaste(1) — 총 <strong>13</strong> notes. InterimSummary(2)는 corpus에서 제외.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== SCENE 9 =================== -->
+    <section class="scene" id="scene-9">
+      <div class="scene-meta">
+        <span class="scene-num">SCENE 09</span>
+        <span class="scene-title">포맷 토글 — 정리본 1개, 표시는 N개</span>
+      </div>
+      <div class="scene-caption">
+        같은 메시지 안에서 <strong>[결정+진행 / 논의 / 역할별 / 자율]</strong> 4 탭. LLM 재호출 없이 즉시 전환. 역할별 탭은 <strong>BE/FE/PM 그룹 × (자기 발의 / 받은 요청)</strong>으로 cross-role 액션 분리. 한 사람이 여러 role이면 모든 그룹에 노출 (B 결정).
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar bot">B</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author">ChatBot-Alpha-1</span>
+            <span class="bot-tag">앱</span>
+            <span class="msg-time">오후 8:17</span>
+          </div>
+          <div class="msg-content">2026-05-14 미팅 노트</div>
+
+          <div class="summarized">
+            <div class="summarized-head">
+              <span class="title">미팅 정리본 · sess_5o2p</span>
+              <span class="extracted">extracted: 8:17:02</span>
+            </div>
+            <div class="summarized-toolbar">
+              <div class="view-toggle">
+                <button class="active" data-view="rendered" onclick="switchView('rendered')">정리본</button>
+                <button data-view="corpus" onclick="switchView('corpus')">원본 데이터</button>
+              </div>
+              <button class="copy-btn" onclick="copyActive()">
+                <span>복사</span>
+              </button>
+            </div>
+            <div class="format-tabs">
+              <span class="tab" data-fmt="ds">결정+진행</span>
+              <span class="tab" data-fmt="dc">논의</span>
+              <span class="tab active" data-fmt="rb">역할별</span>
+              <span class="tab" data-fmt="ff">자율</span>
+              <span class="badge">LLM 재호출 X · 즉시 전환</span>
+            </div>
+
+            <div class="summarized-content" id="content-rb" data-active="true">
+              <div class="role-group be">
+                <div class="role-name">
+                  <span class="role-badge be">BACKEND</span>
+                  <span class="members">members: deadwhale</span>
+                </div>
+                <div class="sub-section">
+                  <div class="label">자기 발의 액션</div>
+                  <div class="item">· 큐레이션 order spec 확장 / 관리자 order 제어 구현 <span class="from-tag">[from: deadwhale]</span></div>
+                  <div class="item">· 차주 큐레이션 커스텀 스펙 구현 <span class="from-tag">[from: deadwhale, due: 2026-05-21]</span></div>
+                </div>
+                <div class="sub-section">
+                  <div class="label">받은 요청</div>
+                  <div class="item">· (없음)</div>
+                </div>
+              </div>
+
+              <div class="role-group fe">
+                <div class="role-name">
+                  <span class="role-badge fe">FRONTEND</span>
+                  <span class="members">members: hyejungpark</span>
+                </div>
+                <div class="sub-section">
+                  <div class="label">자기 발의 액션</div>
+                  <div class="item">· 홈화면 토글 UI 개선 배포 <span class="from-tag">[from: hyejungpark]</span></div>
+                  <div class="item">· 지역 어드민 화면 개발 및 배포 <span class="from-tag">[from: hyejungpark]</span></div>
+                </div>
+                <div class="sub-section">
+                  <div class="label">받은 요청</div>
+                  <div class="item">· GitHub 이슈 206/207/208 체크 <span class="from-tag">[from: kimjuye(PM), due: 2026-05-21]</span></div>
+                </div>
+              </div>
+
+              <div class="role-group pm">
+                <div class="role-name">
+                  <span class="role-badge pm">PM</span>
+                  <span class="members">members: kimjuye</span>
+                </div>
+                <div class="sub-section">
+                  <div class="label">자기 발의 액션</div>
+                  <div class="item">· workspace 기획·정책 이슈 통합 정리 <span class="from-tag">[from: kimjuye, due: 2026-05-15]</span></div>
+                  <div class="item">· 위스키 캐스크정보 업데이트 완료 <span class="from-tag">[from: kimjuye, due: 2026-05-21]</span></div>
+                  <div class="item">· 캐스크 완료 후 누락 증류소 추가 <span class="from-tag">[from: kimjuye]</span></div>
+                  <div class="item">· 채용 공고글 재업로드 (홀라/인프런/마케팅) <span class="from-tag">[from: kimjuye]</span></div>
+                  <div class="item">· 국가 카테고리 지도 누락분 채우기 <span class="from-tag">[from: kimjuye]</span></div>
+                </div>
+                <div class="sub-section">
+                  <div class="label">받은 요청</div>
+                  <div class="item">· (없음)</div>
+                </div>
+              </div>
+
+              <h4>참고 자료 (corpus, attribution 후보 아님)</h4>
+              <ul>
+                <li>주간 리포트 — bottle-note-api-server (커밋 37건, 2026-04-30~05-14) <span class="source-tag weekly">WeeklyDump</span></li>
+                <li>외부 paste — 320줄 <span class="source-tag external">ExternalPaste</span></li>
+              </ul>
+
+              <h4>공통 사항</h4>
+              <ul>
+                <li>릴리즈는 매주 미팅에서 git-bot으로 검증, 정책적으로 접근</li>
+                <li>차주 미팅: 2026-05-21 08:00</li>
+              </ul>
+            </div>
+
+            <div class="summarized-content" id="content-ds" data-active="false" style="display: none;">
+              <h4>결정사항</h4>
+              <ul>
+                <li>workspace 기획/정책 이슈 통합 처리 — 5/15 정리 예정</li>
+                <li>릴리즈는 매주 git-bot으로 검증, 정책적 접근</li>
+                <li>차주 미팅: 2026-05-21 08:00</li>
+              </ul>
+              <h4>완료</h4>
+              <ul>
+                <li>큐레이션 화면 제작 및 전달</li>
+                <li>국가 API 스펙 변경 대응 배포 (FE)</li>
+                <li>푸시 기능 제거</li>
+              </ul>
+              <h4>진행 중</h4>
+              <ul>
+                <li>위스키 캐스크정보 업데이트 90%</li>
+                <li>코덱스로 위스키 테이스팅 정보 수정</li>
+                <li>지역 어드민 화면 개발 (FE)</li>
+              </ul>
+              <h4>예정</h4>
+              <ul>
+                <li>홈화면 토글 UI 개선 배포 (FE)</li>
+                <li>큐레이션 order spec 확장 (BE)</li>
+                <li>차주 큐레이션 커스텀 스펙 구현 (BE)</li>
+                <li>GitHub 이슈 206/207/208 FE 체크 (due: 5/21)</li>
+              </ul>
+              <h4>이슈/블로커</h4>
+              <ul>
+                <li>order spec 적용 범위 미정</li>
+                <li>distilleries.image_url 컬럼 변경 하위 호환성 검토 필요</li>
+                <li>카테고리 grouped 응답 변경의 클라이언트 영향</li>
+              </ul>
+            </div>
+
+            <div class="summarized-content" id="content-dc" data-active="false" style="display: none;">
+              <h4>토픽 1 — workspace 통합 이슈 정리</h4>
+              <ul>
+                <li>kimjuye: 기획제안성/정책성 이슈 + 바 정보 관련 이슈(155/157/170/195) 묶음 → 5/15 정리</li>
+                <li>도출: 묶음 기준 합의 필요 (확인 필요)</li>
+              </ul>
+              <h4>토픽 2 — 큐레이션 order 제어</h4>
+              <ul>
+                <li>deadwhale: 생성 시엔 order 제어 있으나 수정엔 없음 → 관리자 기능 확장 필요</li>
+                <li>deadwhale: 차주 커스텀 스펙 구현 합의</li>
+              </ul>
+              <h4>토픽 3 — 위스키 데이터 정비</h4>
+              <ul>
+                <li>kimjuye: 캐스크정보 90% / 다음 미팅 전 완료 / 이후 누락 증류소 추가</li>
+                <li>kimjuye: 코덱스로 테이스팅 정보 수정 진행</li>
+              </ul>
+              <h4>토픽 4 — 릴리즈 운영</h4>
+              <ul>
+                <li>deadwhale: weekly dump 공유 — 어드민 기준정보 API 확장 / 정렬 표준화 / 푸시 제거 완료</li>
+                <li>합의: 매주 미팅 시 git-bot으로 검증, 정책적 접근</li>
+              </ul>
+            </div>
+
+            <div class="summarized-content" id="content-ff" data-active="false" style="display: none;">
+              <h4>2026-05-14 미팅 자율 정리</h4>
+              <p style="margin-bottom: 10px;">이번 주는 운영 데이터 정비와 어드민 도구 확장이 큰 축이었다. PM(kimjuye)은 workspace 이슈 통합과 위스키 데이터 정비에 집중했고, 백엔드(deadwhale)는 큐레이션 order 제어 확장과 주간 리포트 공유로 흐름을 정리했다. 프론트(hyejungpark)는 국가 API 스펙 대응 배포를 끝내고 홈/지역 어드민 작업으로 넘어갔다.</p>
+              <p style="margin-bottom: 10px;">크로스 작업 한 건이 명확했다 — kimjuye가 FE에 GitHub 이슈 206/207/208 체크를 차주 미팅 전까지 요청했다. 릴리즈 운영은 매주 git-bot 검증으로 정책화하기로 합의.</p>
+              <p>차주(5/21 08:00)까지 마감 항목: 캐스크 완료, FE 이슈 체크, BE 커스텀 스펙. 미정 항목은 order spec 적용 범위와 workspace 묶음 기준.</p>
+            </div>
+
+            <!-- 원본 데이터 (corpus) 뷰 -->
+            <div class="corpus-view" id="corpus-view" style="display: none;">
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">19:58:14</span><span class="author kimjuye">kimjuye</span><span class="role-badge pm">PM</span><span class="source-tag human">Human</span></div>
+                <div class="corpus-body">workspace 이슈에 기획제안성, 정책성 이슈 통합 처리
+예) 이슈155, 이슈170 등 취합 정리.
+바 정보 관련 157, 170, 195등 연관 이슈를 하나로 묶어서 정리.
+5월 15일에 정리할 예정</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">19:58:39</span><span class="author kimjuye">kimjuye</span><span class="role-badge pm">PM</span><span class="source-tag human">Human</span></div>
+                <div class="corpus-body">홀라, 인프런 개발자/디자이너 공고글 재업로드, 마케팅 모집도 재 업로드.</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">19:59:02</span><span class="author kimjuye">kimjuye</span><span class="role-badge pm">PM</span><span class="source-tag human">Human</span></div>
+                <div class="corpus-body">큐레이션 화면은 제작 후 현기님께 전달완료</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">19:59:18</span><span class="author kimjuye">kimjuye</span><span class="role-badge pm">PM</span><span class="source-tag human">Human</span></div>
+                <div class="corpus-body">위스키 캐스크정보 업데이트 90%완료 다음 미팅까지 완료예정
+코덱스로 위스키 테이스팅 정보 수정 진행중</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">20:01:52</span><span class="author deadwhale">deadwhale</span><span class="role-badge be">BE</span><span class="source-tag human">Human</span></div>
+                <div class="corpus-body">큐레이션 알코올스 계열들에서 order 제어 기능 필요.
+생성에는 있는데 수정 등에서는 없음. 큐레이션 관리자 기능으로서 order spec 확장이 필요함.</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">20:03:11</span><span class="author kimjuye">kimjuye</span><span class="role-badge pm">PM</span><span class="source-tag human">Human</span></div>
+                <div class="corpus-body">증류소 없는거 찾아서 추가하기 -> 캐스크정보 업데이트 완료 후 할 예정</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">20:03:48</span><span class="author">[tool]</span><span class="source-tag weekly">WeeklyDump</span><span style="font-size:10.5px;color:var(--text-muted);">segment seg_w1 · 38줄 압축됨</span></div>
+                <div class="corpus-body dimmed">2026-05-14 주간 리포트 — bottle-note/bottle-note-api-server
+한 줄: 어드민 기준정보 API 확장과 정렬 필드 표준화가 가장 활발 (커밋 37건, open 0).
+주요 활동: 어드민 증류소 CRUD/이미지 S3 전환, sortOrder 표준화, 카테고리 grouped 변경, 푸시 제거 완료.
+다음 주 우선순위: 어드민 회귀 검증 / 클라이언트 호환성 점검 / 배포 파이프라인 점검 / 푸시 잔여 의존성 검색.
+※ Source=WeeklyDump → 액션 attribution 후보에서 제외</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">20:04:32</span><span class="author hyejung">hyejungpark</span><span class="role-badge fe">FE</span><span class="source-tag external">ExternalPaste</span></div>
+                <div class="corpus-body dimmed">[320줄 외부 회의록 paste · 자동 분류됨 · attribution 후보 아님]</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">20:09:48</span><span class="author hyejung">hyejungpark</span><span class="role-badge fe">FE</span><span class="source-tag human">Human</span></div>
+                <div class="corpus-body">[프론트]
+국가 api 스펙 변경 대응 배포 완료
+홈화면 토글 ui 개선 배포 예정
+지역 어드민 화면 배포 예정 (개발중)</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">20:11:05</span><span class="author">[bot]</span><span class="source-tag interim">InterimSummary</span><span style="font-size:10.5px;color:var(--text-muted);">corpus 제외</span></div>
+                <div class="corpus-body dimmed">[중간 요약 결과 · 자기 자신 재흡수 방지로 finalize corpus에서 제외]</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">20:11:42</span><span class="author kimjuye">kimjuye</span><span class="role-badge pm">PM</span><span class="source-tag human">Human</span></div>
+                <div class="corpus-body">국가 카테고리 지도없는거 채우기
+국가 필터 들어간 화면 확인하기</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">20:13:08</span><span class="author kimjuye">kimjuye</span><span class="role-badge pm">PM</span><span class="source-tag human">Human</span></div>
+                <div class="corpus-body">차주 미팅까지 깃허브 이슈 206,207,208 프론트엔드 체크 요청
+[detected: cross-role · target=FE · due=2026-05-21]</div>
+              </div>
+              <div class="corpus-note">
+                <div class="corpus-meta"><span class="ts">20:14:12</span><span class="author deadwhale">deadwhale</span><span class="role-badge be">BE</span><span class="source-tag human">Human</span></div>
+                <div class="corpus-body">차주 미팅은 목요일 5/21 8:00시
+백엔드는 차주 큐레이션 커스텀 스펙 구현 필요</div>
+              </div>
+              <div class="corpus-stats">
+                Notes 13 · Human 11 / WeeklyDump 1 / ExternalPaste 1 · InterimSummary 1 (corpus 제외)<br/>
+                Speakers 3 · Roles {BE, FE, PM} · Cross-role action 1 · Self action 11
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== SCENE 10 =================== -->
+    <section class="scene" id="scene-10">
+      <div class="scene-meta">
+        <span class="scene-num">SCENE 10</span>
+        <span class="scene-title">세션 종료 — 명시적 트리거</span>
+      </div>
+      <div class="scene-caption">
+        [세션 종료] 클릭. 상태: <code>CLOSED</code>. 모든 FinalizeRun이 thread에 보존되어 후속 검색·인용 가능. finalize는 종료가 아니라 도구 — 종료는 별도 액션.
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar deadwhale">D</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author deadwhale">deadwhale</span>
+            <span class="role-badge be">BACKEND</span>
+            <span class="msg-time">오후 8:18</span>
+          </div>
+          <div class="msg-content">[세션 종료 클릭]</div>
+        </div>
+      </div>
+
+      <div class="msg first-of-group">
+        <div class="avatar bot">B</div>
+        <div class="msg-body">
+          <div class="msg-header">
+            <span class="author">ChatBot-Alpha-1</span>
+            <span class="bot-tag">앱</span>
+            <span class="msg-time">오후 8:18</span>
+          </div>
+          <div class="embed danger">
+            <div class="embed-title">세션 종료 · sess_5o2p · CLOSED</div>
+            <div class="embed-body">
+              <strong>23분 53초</strong> 동안 누적: <br/>
+              · Notes 13 (Human 11 / WeeklyDump 1 / ExternalPaste 1)<br/>
+              · Segments 1 (weekly_summary)<br/>
+              · FinalizeRuns 1 (포맷 4종 모두 토글 가능)<br/><br/>
+              스레드는 보존됩니다. 검색·인용 시 이 세션 ID로 참조하세요.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- input bar (decorative) -->
+    <div class="input-bar">
+      <div class="input">메시지 입력 — 세션 종료 후 비활성</div>
+    </div>
+
+    <!-- =================== EPILOGUE =================== -->
+    <section id="epilogue" class="epilogue">
+      <h2>3원칙 — "유기적"의 코드화</h2>
+      <div class="principle-grid">
+        <div class="principle-card">
+          <div class="num">01</div>
+          <div class="title">컨텍스트 단일성</div>
+          <div class="desc">세션은 종료 전까지 같은 스레드. sub-action은 컨텍스트를 깨지 않는다 — 별 스레드 X, 별 모드 X.</div>
+        </div>
+        <div class="principle-card">
+          <div class="num">02</div>
+          <div class="title">Source 라벨링</div>
+          <div class="desc">모든 데이터에 출처 라벨. 발화·도구결과·외부dump가 corpus에 같이 살되, attribution은 라벨로 차별.</div>
+        </div>
+        <div class="principle-card">
+          <div class="num">03</div>
+          <div class="title">Content/Format 분리</div>
+          <div class="desc">콘텐츠는 1회 추출(LLM), 포맷은 N회 변환(순수 함수). finalize는 종료가 아니라 도구.</div>
+        </div>
+      </div>
+      <div class="footer-note">
+        본 페이지는 super-session 동작 시안 walkthrough입니다. 데이터는 5/14 실제 미팅에서 발췌. UI는 Discord 흉내(시각 mockup).
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+  // ==== 포맷 탭 토글 ====
+  let activeFmt = 'rb';
+  document.querySelectorAll('.format-tabs .tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const fmt = tab.dataset.fmt;
+      activeFmt = fmt;
+      document.querySelectorAll('.format-tabs .tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      // corpus 뷰일 때는 포맷 전환해도 보이지 않게 — rendered 모드일 때만 노출
+      if (currentView === 'rendered') {
+        ['rb', 'ds', 'dc', 'ff'].forEach(k => {
+          const el = document.getElementById('content-' + k);
+          if (!el) return;
+          el.style.display = (k === fmt) ? 'block' : 'none';
+        });
+      }
+    });
+  });
+
+  // ==== 정리본 / 원본 데이터 뷰 토글 ====
+  let currentView = 'rendered';
+  function switchView(view) {
+    currentView = view;
+    document.querySelectorAll('.summarized-toolbar .view-toggle button').forEach(b => {
+      b.classList.toggle('active', b.dataset.view === view);
+    });
+    const formatTabs = document.querySelector('.format-tabs');
+    const corpusView = document.getElementById('corpus-view');
+    if (view === 'rendered') {
+      formatTabs.style.display = '';
+      ['rb', 'ds', 'dc', 'ff'].forEach(k => {
+        const el = document.getElementById('content-' + k);
+        if (!el) return;
+        el.style.display = (k === activeFmt) ? 'block' : 'none';
+      });
+      corpusView.style.display = 'none';
+    } else {
+      formatTabs.style.display = 'none';
+      ['rb', 'ds', 'dc', 'ff'].forEach(k => {
+        const el = document.getElementById('content-' + k);
+        if (el) el.style.display = 'none';
+      });
+      corpusView.style.display = 'block';
+    }
+  }
+
+  // ==== 복사 버튼 ====
+  function copyActive() {
+    let text = '';
+    if (currentView === 'rendered') {
+      const el = document.getElementById('content-' + activeFmt);
+      // 텍스트만 추출 + 줄바꿈 보존
+      text = extractText(el);
+    } else {
+      const el = document.getElementById('corpus-view');
+      text = extractText(el);
+    }
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = document.querySelector('.summarized-toolbar .copy-btn');
+      const span = btn.querySelector('span');
+      const old = span.textContent;
+      btn.classList.add('copied');
+      span.textContent = '복사됨';
+      setTimeout(() => {
+        btn.classList.remove('copied');
+        span.textContent = old;
+      }, 1400);
+    });
+  }
+  function extractText(node) {
+    // 간단한 markdown-ish 추출 — h4는 ##, li는 - 로 변환
+    let out = '';
+    function walk(n) {
+      if (n.nodeType === 3) { out += n.textContent; return; }
+      const tag = (n.tagName || '').toLowerCase();
+      if (tag === 'h4') { out += '\n## '; n.childNodes.forEach(walk); out += '\n'; return; }
+      if (tag === 'li') { out += '- '; n.childNodes.forEach(walk); out += '\n'; return; }
+      if (tag === 'ul') { n.childNodes.forEach(walk); out += '\n'; return; }
+      if (tag === 'p') { n.childNodes.forEach(walk); out += '\n\n'; return; }
+      if (tag === 'br') { out += '\n'; return; }
+      if (tag === 'div' && n.classList.contains('role-group')) { out += '\n'; n.childNodes.forEach(walk); out += '\n'; return; }
+      if (tag === 'div' && n.classList.contains('sub-section')) { n.childNodes.forEach(walk); out += '\n'; return; }
+      if (tag === 'div' && n.classList.contains('label')) { out += '\n[' + n.textContent.trim() + ']\n'; return; }
+      if (tag === 'div' && n.classList.contains('item')) { out += n.textContent.trim() + '\n'; return; }
+      if (tag === 'div' && n.classList.contains('role-name')) { out += '\n# ' + n.textContent.trim() + '\n'; return; }
+      if (tag === 'div' && n.classList.contains('corpus-note')) { n.childNodes.forEach(walk); out += '\n'; return; }
+      if (tag === 'div' && n.classList.contains('corpus-meta')) { out += '[' + n.textContent.trim() + ']\n'; return; }
+      if (tag === 'div' && n.classList.contains('corpus-body')) { out += n.textContent + '\n'; return; }
+      n.childNodes.forEach(walk);
+    }
+    walk(node);
+    return out.trim().replace(/\n{3,}/g, '\n\n');
+  }
+</script>
+</body>
+</html>

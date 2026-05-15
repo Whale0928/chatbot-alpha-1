@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -106,12 +107,16 @@ func startSlashSession(s *discordgo.Session, i *discordgo.InteractionCreate, ent
 		State:     StateSelectMode,
 		ThreadID:  thread.ID,
 		UserID:    userID,
+		GuildID:   i.GuildID,
 		UpdatedAt: time.Now(),
 	}
 	sessionsMu.Lock()
 	sessions[thread.ID] = sess
 	sessionsMu.Unlock()
-	log.Printf("[slash] 세션 생성 thread=%s entry=%s user=%s", thread.ID, entryName(entry), userID)
+	log.Printf("[slash] 세션 생성 thread=%s entry=%s user=%s guild=%s", thread.ID, entryName(entry), userID, i.GuildID)
+
+	// DB 영속화 (best-effort) — 실패해도 in-memory로 진행.
+	persistSessionStart(context.Background(), sess)
 
 	if _, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 		Content: fmt.Sprintf("스레드를 생성했습니다 → <#%s>", thread.ID),
