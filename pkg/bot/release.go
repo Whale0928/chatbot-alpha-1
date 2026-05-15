@@ -546,14 +546,18 @@ func handleReleaseConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, 
 		respondInteraction(s, i, "이전 release가 실패한 상태입니다. sticky의 [릴리즈 PR 만들기]로 새로 시작해주세요. (stale 컨텍스트 재실행은 GitHub 중복 작업 위험으로 차단)")
 		return
 	}
-	// 동일 ctx의 [확인] 중복 클릭 reject — 이미 진행 중이면 두 번째 click이 새 progress 메시지 + 새 goroutine 발사하는 race 방어.
-	if rc.InProgress.Load() {
-		logGuard("release", "double_confirm", "[확인] button 중복 click — 이미 진행 중",
+	// codex 4차 + Copilot 4차 fix: CompareAndSwap으로 [확인] 중복/동시 클릭 단일 진입 보장.
+	// Load() then runReleaseFlow goroutine이 Store(true)하는 pattern은 race window 존재 —
+	// 두 click이 동시 도착하면 둘 다 Load=false 보고 통과 → 두 개 goroutine 동시 실행 → 중복 PR/rc race.
+	// CAS는 atomic — 한 click만 false→true 전이 성공, 다른 click은 false 받고 reject.
+	if !rc.InProgress.CompareAndSwap(false, true) {
+		logGuard("release", "double_confirm", "[확인] button 중복/동시 click — 이미 진행 중",
 			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
 			lf("module", rc.Module.Key))
 		respondInteraction(s, i, "이미 release가 진행 중입니다. 완료 후 다시 시도해주세요.")
 		return
 	}
+	// 여기 도달했으면 InProgress.CAS 성공 — 이 goroutine만 진행. runReleaseFlow는 defer로 Store(false)만 수행.
 
 	// ack — 진행 표시 메시지는 별도 channel send
 	respondInteraction(s, i, fmt.Sprintf("`%s` 릴리즈를 진행합니다. (`v%s` → `v%s`)",
@@ -799,10 +803,13 @@ func runReleaseSteps(ctx context.Context, rc *ReleaseContext, statusFn ReleaseSt
 // runReleaseSteps + 단일 모드 progress UI/sendResult/sticky/polling을 wrap한다.
 //
 // codex review P2/P3 fix: rc.InProgress lifecycle을 명확히 마킹 — sticky [릴리즈 PR 만들기] 가드가
-// "in-flight vs abandoned" 구분 가능. 시작 시 true, defer로 false (성공/실패 모두).
-// 3차 race fix: atomic.Bool — interaction handler가 동시에 .Load()로 가드 체크하기 때문.
+// "in-flight vs abandoned" 구분 가능.
+//
+// 3차 race fix: atomic.Bool — interaction handler가 동시에 .Load()로 가드 체크.
+// 4차 race fix (Copilot): InProgress.Store(true)는 caller(handleReleaseConfirm)가 CompareAndSwap으로 미리
+// commit. runReleaseFlow는 defer로 Store(false)만 수행해 동시 [확인] click이 두 goroutine 동시 발사하는
+// race 차단 (Load+Store pattern은 race window 존재).
 func runReleaseFlow(s *discordgo.Session, sess *Session, rc *ReleaseContext) {
-	rc.InProgress.Store(true)
 	defer func() {
 		rc.InProgress.Store(false)
 	}()
