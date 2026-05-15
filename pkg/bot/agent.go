@@ -19,39 +19,28 @@ import (
 // 에이전트 모드 — 자유 자연어 지시
 // =====================================================================
 //
-// 흐름:
-//   [에이전트] 클릭 → handleAgent → StateAgentAwaitInput
-//     → 사용자 자유 텍스트 → handleAgentMessage
-//       → 등록 레포 병렬 fetch (open 이슈 + 14일 커밋)
-//       → summarize.Agent 호출 → 결과 전송 + [처음 메뉴]
+// 흐름 (D1 super-session 통합):
+//   sticky [AI에게 질문] 클릭 → discord.go의 customIDSubActionAgent case가 직접
+//     PendingAgentUserID 박제 + StateAgentAwaitInput 전환
+//   → 본인 발화 → handleAgentMessage
+//     → 등록 레포 병렬 fetch (open 이슈 + 14일 커밋)
+//     → summarize.Agent 호출 → 결과 전송 + sticky 재발사 (A-8)
+//
+// /agent instruction:... slash 명령어는 super-session 시작 후 즉시 runAgentInstruction 호출.
 //
 // 데이터 dump 크기 부담은 토큰 비용으로 부메랑이지만, 의도 분류 1단계 없이도
 // LLM이 user request에서 레포/필터를 의미 매칭으로 해결한다.
 
 const (
-	customIDAgentBtn      = "mode_agent"
 	agentGitHubTimeout    = 30 * time.Second
 	agentLLMTimeout       = 90 * time.Second
 	agentCommitWindowDays = 14
 )
 
-// handleAgent는 [에이전트] 버튼 클릭 시 자유 지시 입력 대기 상태로 전환한다.
-func handleAgent(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
-	if githubClient == nil {
-		respondInteraction(s, i, "GITHUB_TOKEN이 설정되어 있지 않아 에이전트를 시작할 수 없습니다.")
-		return
-	}
-	if llmClient == nil {
-		respondInteraction(s, i, "LLM 클라이언트가 초기화되지 않았습니다.")
-		return
-	}
-	sess.State = StateAgentAwaitInput
-	respondInteraction(s, i,
-		"무엇을 도와드릴까요? 자유롭게 지시해주세요.\n"+
-			"예) `워크스페이스에서 인프라 관련 열려있는 이슈들 가져와`\n"+
-			"예) `BE에서 지난 14일 동안 가장 큰 변경 요약해줘`\n"+
-			"예) `취소` 입력 시 에이전트 종료")
-}
+// customIDAgentBtn ("mode_agent") 폐기 — D1 정책 (UX 재설계 2026-05).
+// home menu의 [에이전트] button이 사라지고 super-session sticky의 [AI에게 질문](customIDSubActionAgent)
+// 로 통일. 그 button은 discord.go에서 직접 PendingAgentUserID 박제 + StateAgentAwaitInput 전환을
+// 처리하므로 별도 handleAgent 함수도 폐기.
 
 // handleAgentMessage는 사용자 자유 텍스트를 받아 검증 + cancel 처리 후 runAgentInstruction에 위임한다.
 // 슬래시 /agent instruction:... 직접 실행 흐름과 공통 본체를 공유하기 위해 분리되어 있다.
@@ -63,21 +52,9 @@ func handleAgentMessage(s *discordgo.Session, m *discordgo.MessageCreate, sess *
 		s.ChannelMessageSend(m.ChannelID, "지시가 비어 있습니다. 다시 입력해주세요.")
 		return
 	}
-	if content == "취소" {
-		// super-session(미팅 모드)에서 cancel — StateMeeting 유지해 후속 발화를 corpus에 계속 누적.
-		// legacy 흐름은 SelectMode로 복귀하고 [처음 메뉴] 노출.
-		if sess.Mode == ModeMeeting {
-			sess.State = StateMeeting
-			s.ChannelMessageSend(m.ChannelID, "에이전트 입력을 취소했습니다. 미팅이 계속 진행 중입니다 (메시지를 자유롭게 입력하세요).")
-		} else {
-			sess.State = StateSelectMode
-			s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
-				Content:    "에이전트를 종료했습니다.",
-				Components: []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}}},
-			})
-		}
-		return
-	}
+	// D4 button-only — "취소" 텍스트 escape 폐기. agent 입력 대기 상태에서 빠져나오려면
+	// sticky의 다른 button을 누르면 됨 (interactionCreate가 PendingAgentUserID clear + State 복귀).
+	// 텍스트 입력은 모두 LLM 지시로 처리 (super-session에서는 본인 발화만).
 	runAgentInstruction(s, sess, content, m.Author.Username)
 }
 
@@ -117,6 +94,9 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 				"rendered_runes":  len([]rune(renderedFinal)),
 			})
 		}()
+		// A-8 (D3): sub-action 결과 후 sticky 즉시 재발사 — 다음 button 즉시 클릭 가능.
+		// 정상/실패 모든 종료 경로에서 발사. LIFO 순서로 EndWithArtifact 다음에 실행.
+		defer sendSticky(s, sess)
 	}
 
 	// === Phase 3 chunk 4 — progress 바 (super-session 전용) ===
@@ -199,14 +179,7 @@ func runAgentInstruction(s *discordgo.Session, sess *Session, content, authorNam
 		sa.AppendResult(appendCtx, sess, "[agent]", db.SourceAgentOutput, rendered)
 		appendCancel()
 	}
-	if _, err := s.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-		Content: "이어서 다른 작업을 시작하려면 [처음 메뉴]를 눌러주세요.",
-		Components: []discordgo.MessageComponent{
-			discordgo.ActionsRow{Components: []discordgo.MessageComponent{homeButton()}},
-		},
-	}); err != nil {
-		log.Printf("[agent/send] ERR home button: %v", err)
-	}
+	// D1 정책 (UX 재설계 2026-05): [처음 메뉴] button row 폐기. 후속 작업은 super-session sticky로.
 	// 미팅 모드에서는 후속 발화가 corpus에 계속 누적되어야 하므로 StateMeeting 유지.
 	if sess.Mode == ModeMeeting {
 		sess.State = StateMeeting

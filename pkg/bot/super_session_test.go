@@ -18,99 +18,95 @@ func TestSuperSessionStickyComponents_TwoRows(t *testing.T) {
 	}
 }
 
-func TestSuperSessionStickyComponents_Row1HasFiveButtons(t *testing.T) {
+func TestSuperSessionStickyComponents_V4Layout_Row1Primary(t *testing.T) {
+	// V4 layout — Row 1: [중간 요약] [회의록 정리] (primary 강조 2개)
 	comps := superSessionStickyComponents()
 	row1, ok := comps[0].(discordgo.ActionsRow)
 	if !ok {
 		t.Fatalf("expected ActionsRow at index 0, got %T", comps[0])
 	}
-	// Fatalf — 길이 mismatch 시 다음 인덱싱이 panic을 일으키지 않도록 즉시 중단.
-	if len(row1.Components) != 5 {
-		t.Fatalf("row 1 button count = %d, want 5 (Discord row max)", len(row1.Components))
+	if len(row1.Components) != 2 {
+		t.Fatalf("V4 row 1 button count = %d, want 2 ([중간 요약]+[회의록 정리])", len(row1.Components))
 	}
-
-	// 정확한 customID 셋 — 순서/위치까지 검증 (UX 가시성)
-	wantOrder := []string{
-		customIDInterimBtn,
-		customIDSubActionWeekly,
-		customIDSubActionRelease,
-		customIDSubActionAgent,
-		customIDFinalizeSummarized,
+	wantOrder := []struct {
+		id    string
+		style discordgo.ButtonStyle
+		label string
+	}{
+		{customIDInterimBtn, discordgo.PrimaryButton, "중간 요약"},
+		{customIDFinalizeSummarized, discordgo.SuccessButton, "회의록 정리"},
 	}
 	for i, want := range wantOrder {
-		btn, ok := row1.Components[i].(discordgo.Button)
-		if !ok {
-			t.Errorf("row 1 position %d: expected Button, got %T", i, row1.Components[i])
-			continue
+		btn := row1.Components[i].(discordgo.Button)
+		if btn.CustomID != want.id {
+			t.Errorf("row 1[%d] customID = %q, want %q", i, btn.CustomID, want.id)
 		}
-		if btn.CustomID != want {
-			t.Errorf("row 1 position %d: customID = %q, want %q", i, btn.CustomID, want)
+		if btn.Style != want.style {
+			t.Errorf("row 1[%d] style = %v, want %v", i, btn.Style, want.style)
+		}
+		if btn.Label != want.label {
+			t.Errorf("row 1[%d] label = %q, want %q", i, btn.Label, want.label)
 		}
 	}
 }
 
-func TestSuperSessionStickyComponents_Row2HasExternalAttachAndSessionEnd(t *testing.T) {
-	// Phase 3 chunk 3C — Row 2에 [외부 자료 첨부] 추가됨
+func TestSuperSessionStickyComponents_V4Layout_Row2SecondaryAndDanger(t *testing.T) {
+	// V4 layout — Row 2: [GitHub 주간 분석][릴리즈 PR 만들기][AI에게 질문][외부 문서 첨부][세션 종료]
 	comps := superSessionStickyComponents()
 	row2, ok := comps[1].(discordgo.ActionsRow)
 	if !ok {
 		t.Fatalf("expected ActionsRow at index 1, got %T", comps[1])
 	}
-	if len(row2.Components) != 2 {
-		t.Fatalf("row 2 button count = %d, want 2 ([외부 자료]+[세션 종료])", len(row2.Components))
+	if len(row2.Components) != 5 {
+		t.Fatalf("V4 row 2 button count = %d, want 5 (자료 4 + 세션 종료)", len(row2.Components))
 	}
-
-	// Position 0 — [외부 자료 첨부] (Secondary)
-	btnAttach, ok := row2.Components[0].(discordgo.Button)
-	if !ok {
-		t.Fatalf("row 2[0]: expected Button, got %T", row2.Components[0])
+	wantOrder := []struct {
+		id    string
+		style discordgo.ButtonStyle
+		label string
+	}{
+		{customIDSubActionWeekly, discordgo.SecondaryButton, "GitHub 주간 분석"},
+		{customIDSubActionRelease, discordgo.SecondaryButton, "릴리즈 PR 만들기"},
+		{customIDSubActionAgent, discordgo.SecondaryButton, "AI에게 질문"},
+		{customIDExternalAttach, discordgo.SecondaryButton, "외부 문서 첨부"},
+		{customIDSessionEnd, discordgo.DangerButton, "세션 종료"},
 	}
-	if btnAttach.CustomID != customIDExternalAttach {
-		t.Errorf("row 2[0] customID = %q, want %q", btnAttach.CustomID, customIDExternalAttach)
-	}
-	if btnAttach.Style != discordgo.SecondaryButton {
-		t.Errorf("row 2[0] style = %v, want SecondaryButton", btnAttach.Style)
-	}
-
-	// Position 1 — [세션 종료] (Danger)
-	btnEnd, ok := row2.Components[1].(discordgo.Button)
-	if !ok {
-		t.Fatalf("row 2[1]: expected Button, got %T", row2.Components[1])
-	}
-	if btnEnd.CustomID != customIDSessionEnd {
-		t.Errorf("row 2[1] customID = %q, want %q", btnEnd.CustomID, customIDSessionEnd)
-	}
-	if btnEnd.Style != discordgo.DangerButton {
-		t.Errorf("row 2[1] style = %v, want DangerButton", btnEnd.Style)
-	}
-}
-
-func TestSuperSessionStickyComponents_FinalizeButtonHighlighted(t *testing.T) {
-	// 정리본은 가장 자주 쓰는 핵심 button — SuccessButton (강조 녹색)
-	comps := superSessionStickyComponents()
-	row1 := comps[0].(discordgo.ActionsRow)
-	for _, c := range row1.Components {
-		btn := c.(discordgo.Button)
-		if btn.CustomID == customIDFinalizeSummarized {
-			if btn.Style != discordgo.SuccessButton {
-				t.Errorf("정리본 button style = %v, want SuccessButton", btn.Style)
-			}
-			return
+	for i, want := range wantOrder {
+		btn := row2.Components[i].(discordgo.Button)
+		if btn.CustomID != want.id {
+			t.Errorf("row 2[%d] customID = %q, want %q", i, btn.CustomID, want.id)
+		}
+		if btn.Style != want.style {
+			t.Errorf("row 2[%d] style = %v, want %v", i, btn.Style, want.style)
+		}
+		if btn.Label != want.label {
+			t.Errorf("row 2[%d] label = %q, want %q", i, btn.Label, want.label)
 		}
 	}
-	t.Errorf("정리본 button을 row 1에서 찾지 못함")
 }
 
-func TestBuildSuperSessionStickyMessageSend_ContainsNoteCount(t *testing.T) {
+func TestBuildSuperSessionStickyMessageSend_BodyContainsLabelTable(t *testing.T) {
 	got := buildSuperSessionStickyMessageSend(13)
 	if !strings.Contains(got.Content, "13") {
-		t.Errorf("content가 노트 수 13을 포함해야 함, got: %q", got.Content)
+		t.Errorf("content에 노트 수 13 누락: %q", got.Content)
 	}
-	if !strings.Contains(got.Content, "super-session") {
-		t.Errorf("content가 'super-session' 라벨을 포함해야 함, got: %q", got.Content)
+	mustContain := []string{
+		"super-session 진행 중",
+		"[중간 요약]", "지금까지 회의",
+		"[회의록 정리]", "4 포맷 정리본",
+		"[GitHub 주간 분석]", "레포 활동",
+		"[릴리즈 PR 만들기]", "모듈",
+		"[AI에게 질문]",
+		"[외부 문서 첨부]",
+		"[세션 종료]",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(got.Content, s) {
+			t.Errorf("sticky 본문에 %q 누락:\n%s", s, got.Content)
+		}
 	}
 	if len(got.Components) != 2 {
-		t.Errorf("Components = %d rows, want 2", len(got.Components))
+		t.Errorf("Components = %d rows, want 2 (V4)", len(got.Components))
 	}
 }
 

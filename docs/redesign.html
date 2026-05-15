@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>릴리즈 PR 플로우 (V4 sticky + super-session)</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --bg-card: #1a2027;
+    --bg-discord: #313338;
+    --bg-discord-msg: #2b2d31;
+    --bg-elevated: #232b35;
+    --bg-button-disco: #4e5058;
+    --bg-button-primary: #5865f2;
+    --bg-button-success: #248046;
+    --bg-button-danger: #da373c;
+    --bg-button-secondary: #4e5058;
+    --border: #2d3640;
+    --border-strong: #3d4754;
+    --text: #e6e9ed;
+    --text-dim: #9aa4b2;
+    --text-muted: #6b7785;
+    --accent: #5fb3f5;
+    --accent-strong: #2d6fa8;
+    --code-bg: #0a0e13;
+    --good: #6fe5a4;
+    --warn: #f5b35f;
+    --danger: #f56b6b;
+    --release-be: #f47fff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Pretendard", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    padding: 32px 40px;
+    max-width: 980px;
+    margin: 0 auto;
+  }
+
+  header { border-bottom: 1px solid var(--border); padding-bottom: 18px; margin-bottom: 28px; }
+  header h1 { font-size: 22px; letter-spacing: -0.3px; }
+  header .sub { color: var(--text-dim); margin-top: 6px; font-size: 13px; }
+  header .premise {
+    margin-top: 12px;
+    padding: 10px 14px;
+    background: rgba(95, 179, 245, 0.06);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  header .premise b { color: var(--accent); }
+
+  /* Step block */
+  .step {
+    display: grid;
+    grid-template-columns: 60px 1fr;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .step-num {
+    display: flex; flex-direction: column; align-items: center;
+    padding-top: 14px;
+  }
+  .step-num .n {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    background: var(--accent-strong);
+    color: var(--text);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13px;
+  }
+  .step-num .line {
+    flex: 1;
+    width: 2px;
+    background: var(--border);
+    margin-top: 6px;
+    min-height: 30px;
+  }
+  .step:last-child .step-num .line { display: none; }
+
+  .step-content {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .step-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .step-trigger {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: "JetBrains Mono", monospace;
+    margin-bottom: 10px;
+  }
+  .step-trigger .kw { color: var(--accent); }
+  .step-trigger .arrow { color: var(--warn); margin: 0 4px; }
+
+  /* Discord-like message */
+  .disco {
+    background: var(--bg-discord);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 12px;
+    margin-top: 4px;
+  }
+  .disco-msg {
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .disco-msg:last-child { border-bottom: none; }
+  .disco-avatar {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700;
+    color: white;
+  }
+  .disco-avatar.bot { background: var(--bg-button-primary); }
+  .disco-avatar.user { background: var(--release-be); color: #1e2125; }
+  .disco-name {
+    font-size: 11.5px; font-weight: 600;
+  }
+  .disco-name .tag {
+    background: var(--bg-button-primary);
+    color: white; font-size: 9px;
+    padding: 1px 4px; border-radius: 2px; margin-left: 4px;
+  }
+  .disco-body {
+    font-size: 12px; color: var(--text);
+    margin-top: 2px;
+    line-height: 1.5;
+  }
+  .disco-body code {
+    background: var(--code-bg);
+    padding: 1px 5px; border-radius: 3px;
+    color: var(--accent);
+    font-size: 11px;
+  }
+  .disco-body .muted { color: var(--text-muted); font-size: 11px; }
+
+  /* Button row */
+  .ds-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .ds-btn {
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text);
+    background: var(--bg-button-disco);
+    border: none;
+  }
+  .ds-btn.primary { background: var(--bg-button-primary); }
+  .ds-btn.success { background: var(--bg-button-success); }
+  .ds-btn.danger { background: var(--bg-button-danger); }
+  .ds-btn.secondary { background: var(--bg-button-secondary); }
+
+  /* V4 sticky 컴팩트 */
+  .v4-sticky {
+    margin-top: 4px;
+    background: rgba(0,0,0,0.18);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 7px 9px;
+  }
+  .v4-sticky .v4-head {
+    color: var(--text-dim);
+    font-size: 10.5px;
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px dashed var(--border);
+  }
+  .v4-sticky .v4-head strong { color: var(--text); }
+  .v4-primary { display: flex; gap: 4px; margin-bottom: 5px; }
+  .v4-primary .ds-btn { padding: 5px 10px; font-size: 11px; flex: 1; }
+  .v4-secondary {
+    display: flex; flex-wrap: wrap; gap: 3px;
+    padding-top: 5px;
+    border-top: 1px dashed var(--border);
+  }
+  .v4-secondary .ds-btn { padding: 3px 6px; font-size: 9.5px; }
+  .v4-secondary .ds-btn.danger { margin-left: auto; }
+
+  /* Confirm embed */
+  .embed {
+    margin-top: 4px;
+    background: var(--bg-discord-msg);
+    border-left: 4px solid var(--release-be);
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+  .embed-title {
+    font-weight: 700;
+    font-size: 13px;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+  .embed-fields {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    gap: 4px 12px;
+    font-size: 11.5px;
+  }
+  .embed-fields dt { color: var(--text-muted); }
+  .embed-fields dd { color: var(--text); }
+  .embed-meta {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 10.5px;
+    color: var(--text-muted);
+  }
+
+  /* Progress bar */
+  .progress {
+    background: var(--code-bg);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11.5px;
+    color: var(--accent);
+    margin-top: 4px;
+  }
+  .progress-state {
+    display: grid;
+    gap: 3px;
+    margin-top: 4px;
+  }
+
+  /* highlight click target */
+  .clicked {
+    outline: 2px solid var(--warn);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px rgba(245, 179, 95, 0.15);
+  }
+
+  /* Footer note */
+  .note-callout {
+    margin-top: 6px;
+    padding: 6px 10px;
+    background: rgba(111, 229, 164, 0.06);
+    border-left: 2px solid var(--good);
+    border-radius: 0 3px 3px 0;
+    font-size: 10.5px;
+    color: var(--text-dim);
+  }
+  .note-callout b { color: var(--good); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>릴리즈 PR 만들기 — 사용자 플로우 (8단계)</h1>
+  <div class="sub">V4 sticky + super-session(D1~D4) 정책 적용. 모든 명령은 button만, 텍스트 입력 X.</div>
+  <div class="premise">
+    <b>전제</b>: 미팅 진행 중 · sticky 노출 (V4 형태) · 메모 3건 누적 상태에서 시작.
+    <b>D3</b> 적용으로 매 결과 메시지 후 sticky 재발사.
+  </div>
+</header>
+
+<!-- ============ STEP 1: 시작 ============ -->
+<div class="step">
+  <div class="step-num"><div class="n">1</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">시작 — V4 sticky 보임 (미팅 진행 중)</div>
+    <div class="step-trigger"><span class="kw">사용자가 sticky의</span> <span class="arrow">→</span> <code>[릴리즈 PR]</code> <span class="kw">button 클릭</span></div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="v4-sticky">
+            <div class="v4-head"><strong>super-session 진행 중</strong> · 메모 3건</div>
+            <div class="v4-primary">
+              <button class="ds-btn primary">중간 요약</button>
+              <button class="ds-btn success">회의록 정리</button>
+            </div>
+            <div class="v4-secondary">
+              <button class="ds-btn secondary">GitHub 주간</button>
+              <button class="ds-btn secondary clicked">릴리즈 PR</button>
+              <button class="ds-btn secondary">AI 질문</button>
+              <button class="ds-btn secondary">외부 문서</button>
+              <button class="ds-btn danger">세션 종료</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 2: 라인 선택 (전체 추가) ============ -->
+<div class="step">
+  <div class="step-num"><div class="n">2</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">라인 선택 (단일 또는 전체)</div>
+    <div class="step-trigger">봇 응답 (같은 스레드) <span class="arrow">→</span> 사용자 클릭 — 단일이면 STEP 3, <code>[전체]</code>면 <span style="color:var(--good)">3-A</span>로 분기</div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="disco-body">어떤 라인을 릴리즈할까요?</div>
+          <div class="ds-row">
+            <button class="ds-btn primary clicked">백엔드</button>
+            <button class="ds-btn primary">프론트엔드</button>
+            <button class="ds-btn success">전체</button>
+            <button class="ds-btn secondary">뒤로</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note-callout"><b>신규 [전체]</b>: 4 모듈 일괄 릴리즈 — 프로덕트 API · 어드민 API · 프론트엔드 · 어드민 대시보드. 각 모듈 bump는 개별 선택. 분기는 페이지 하단 <span style="color:var(--good)">"전체 분기 (3-A ~ 7-A)"</span> 섹션 참고.</div>
+  </div>
+</div>
+
+<!-- ============ STEP 3: 모듈 선택 ============ -->
+<div class="step">
+  <div class="step-num"><div class="n">3</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">모듈 선택</div>
+    <div class="step-trigger">봇 응답 <span class="arrow">→</span> 사용자 클릭 <code>[api-server]</code></div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="disco-body"><code>백엔드</code> 라인 — 어떤 모듈?</div>
+          <div class="ds-row">
+            <button class="ds-btn primary clicked">api-server</button>
+            <button class="ds-btn primary">admin</button>
+            <button class="ds-btn primary">batch</button>
+            <button class="ds-btn secondary">뒤로</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 4: bump 선택 ============ -->
+<div class="step">
+  <div class="step-num"><div class="n">4</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">bump 선택 — 현재 버전 + 새 버전 미리보기</div>
+    <div class="step-trigger">봇 응답 (현재 버전 + 3 옵션) <span class="arrow">→</span> 사용자 클릭 <code>[patch · v1.1.5]</code></div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="disco-body">현재 <code>v1.1.4</code> — 어떤 bump?</div>
+          <div class="ds-row">
+            <button class="ds-btn success clicked">patch · v1.1.5</button>
+            <button class="ds-btn primary">minor · v1.2.0</button>
+            <button class="ds-btn danger">major · v2.0.0</button>
+            <button class="ds-btn secondary">뒤로</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 5: 확인 embed ============ -->
+<div class="step">
+  <div class="step-num"><div class="n">5</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">확인 카드 — 변경 요약 + 영향 범위</div>
+    <div class="step-trigger">봇 응답 (embed 카드) <span class="arrow">→</span> 사용자 클릭 <code>[확인]</code></div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="embed">
+            <div class="embed-title">백엔드 · api-server (Bottle Note API Server)</div>
+            <dl class="embed-fields">
+              <dt>현재 → 새 버전</dt><dd><code>v1.1.4</code> → <code>v1.1.5</code></dd>
+              <dt>bump</dt><dd>patch</dd>
+              <dt>base tag</dt><dd>v1.1.4 (직전)</dd>
+              <dt>변경 커밋</dt><dd>14건 (지난 7일)</dd>
+              <dt>release branch</dt><dd>release/api-server</dd>
+            </dl>
+            <div class="embed-meta">확인 시 5단계 진행: diff 수집 → LLM 본문 → VERSION commit → git tag → PR 생성. PR 생성 후 auto-merge 안 함.</div>
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn success clicked">확인</button>
+            <button class="ds-btn secondary">뒤로</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 6: progress ============ -->
+<div class="step">
+  <div class="step-num"><div class="n">6</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">진행 progress (5단계, 약 15초)</div>
+    <div class="step-trigger">봇이 progress 메시지 1건 (1.5초마다 edit) <span class="arrow">→</span> 자동 진행</div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="disco-body">릴리즈 진행 중...</div>
+          <div class="progress-state">
+            <div class="progress">[●○○○○] 단계 1/5 (직전 tag ↔ main diff/커밋 수집) · 2초 경과</div>
+            <div class="progress">[●●○○○] 단계 2/5 (LLM 으로 릴리즈 노트 본문 생성) · 6초 경과</div>
+            <div class="progress">[●●●○○] 단계 3/5 (VERSION 파일 main 에 commit/push) · 10초 경과</div>
+            <div class="progress">[●●●●○] 단계 4/5 (git tag 생성 + release/* 브랜치 확인) · 12초 경과</div>
+            <div class="progress">[●●●●●] 단계 5/5 (PR 생성) · 14초 경과</div>
+          </div>
+          <div class="disco-body muted" style="margin-top: 6px;">⤴ 단일 메시지가 1.5초마다 edit (Discord rate limit 안전)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 7: 결과 ============ -->
+<div class="step">
+  <div class="step-num"><div class="n">7</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">결과 메시지 — PR URL + 본문 미리보기</div>
+    <div class="step-trigger">봇이 새 메시지 (이전 progress 메시지 삭제) <span class="arrow">→</span> 사용자가 [PR 열기]로 GitHub 이동</div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="embed" style="border-left-color: var(--good);">
+            <div class="embed-title" style="color: var(--good);">✓ 릴리즈 PR 생성 완료 — v1.1.5</div>
+            <dl class="embed-fields">
+              <dt>PR</dt><dd><code>#142</code> chore(api-server): release v1.1.5</dd>
+              <dt>head → base</dt><dd><code>main</code> → <code>release/api-server</code></dd>
+              <dt>커밋</dt><dd>14건</dd>
+            </dl>
+            <div class="embed-meta">
+              ### 신규 / 개선<br/>
+              - 어드민 증류소 CRUD API 추가 (sortOrder 표준화)<br/>
+              - 카테고리 레퍼런스 grouped 응답 구조 변경<br/>
+              ### 버그 수정<br/>
+              - 리뷰 수정 시 별점 갱신 누락 수정<br/>
+              ### 호환성<br/>
+              - distilleries.image_url 컬럼명 변경 — 기존 logo_img_url 참조 코드 점검 필요
+            </div>
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn primary">PR 열기 (외부 링크)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note-callout"><b>SubAction 통합</b>: 결과 markdown이 <code>SourceReleaseResult</code>로 sess.Notes에 누적 → 다음 [회의록 정리]에서 ContextNotes로 LLM에 참고 자료 전달.</div>
+  </div>
+</div>
+
+<!-- ============ STEP 8: sticky 재발사 ============ -->
+<div class="step">
+  <div class="step-num"><div class="n">8</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">sticky 재발사 (D3) — 메모 카운트 +1</div>
+    <div class="step-trigger">봇이 즉시 V4 sticky를 맨 아래로 다시 push <span class="arrow">→</span> 사용자가 다음 액션 button 즉시 접근 가능</div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="v4-sticky">
+            <div class="v4-head"><strong>super-session 진행 중</strong> · 메모 4건 <span style="color: var(--good);">(release segment +1)</span></div>
+            <div class="v4-primary">
+              <button class="ds-btn primary">중간 요약</button>
+              <button class="ds-btn success">회의록 정리</button>
+            </div>
+            <div class="v4-secondary">
+              <button class="ds-btn secondary">GitHub 주간</button>
+              <button class="ds-btn secondary">릴리즈 PR</button>
+              <button class="ds-btn secondary">AI 질문</button>
+              <button class="ds-btn secondary">외부 문서</button>
+              <button class="ds-btn danger">세션 종료</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note-callout"><b>D3 적용</b>: 매 sub-action 결과 메시지 직후 sticky 재발사 — 사용자가 button을 절대 시야 밖으로 놓치지 않음.</div>
+  </div>
+</div>
+
+<div style="margin-top: 28px; padding: 14px 16px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--text-dim);">
+  <strong style="color: var(--text);">정책 요약</strong>: 8단계 모두 button만 (텍스트 입력 X) · 같은 스레드 (별 스레드 X) · 결과는 corpus에 누적 · sticky 항상 맨 아래.<br/>
+  <strong style="color: var(--text);">예외 케이스 후속</strong>: 라인/모듈/bump 단계에서 [뒤로] 클릭 시 이전 단계로 / 진행 중 [확인] 후 취소는 PR이 이미 생성됐으면 GitHub에서 close (봇 거기까지 따라가지 않음).
+</div>
+
+<!-- ============ 전체 분기 섹션 ============ -->
+<header style="margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+  <h1 style="color: var(--good);">전체 릴리즈 분기 (3-A ~ 6-A · 5단계)</h1>
+  <div class="sub">STEP 2에서 [전체] 클릭 시 단일 흐름 대신 일괄 흐름. 4 모듈 동시 PR 생성 + 모듈별 bump 개별 선택.</div>
+  <div class="premise">
+    <b>대상 모듈 (4개)</b>: 프로덕트 API · 어드민 API · 프론트엔드 · 어드민 대시보드 — 일괄 PR 생성. 모듈별 bump 개별 선택.
+  </div>
+</header>
+
+<!-- ============ STEP 3-A: 모듈별 bump 선택 ============ -->
+<div class="step">
+  <div class="step-num"><div class="n" style="background: var(--good); color: #102014;">3A</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">모듈별 bump 개별 선택 (4 row)</div>
+    <div class="step-trigger">봇 응답 — 4 모듈 각각 한 row · 사용자가 각 모듈에 대해 bump button 클릭. default = patch (사용자가 안 누르면 patch로 갑).</div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="disco-body">전체 릴리즈 — 모듈별 bump를 선택해주세요. 선택 안 한 모듈은 <code>patch</code> 기본값. 다 정하면 [확인].</div>
+
+          <!-- 모듈 4개 row — 실제 레포 데이터 기반 -->
+          <div style="margin-top: 8px; display: grid; gap: 6px;">
+            <div style="display: grid; grid-template-columns: 160px 1fr; gap: 8px; align-items: center;">
+              <span style="font-size: 11px; color: var(--text-dim);">프로덕트 API · v1.1.4</span>
+              <div class="ds-row" style="margin: 0;">
+                <button class="ds-btn success clicked">patch · v1.1.5</button>
+                <button class="ds-btn primary">minor · v1.2.0</button>
+                <button class="ds-btn danger">major · v2.0.0</button>
+              </div>
+            </div>
+            <div style="display: grid; grid-template-columns: 160px 1fr; gap: 8px; align-items: center;">
+              <span style="font-size: 11px; color: var(--text-dim);">어드민 API · v1.1.4</span>
+              <div class="ds-row" style="margin: 0;">
+                <button class="ds-btn success">patch · v1.1.5</button>
+                <button class="ds-btn primary clicked">minor · v1.2.0</button>
+                <button class="ds-btn danger">major · v2.0.0</button>
+              </div>
+            </div>
+            <div style="display: grid; grid-template-columns: 160px 1fr; gap: 8px; align-items: center;">
+              <span style="font-size: 11px; color: var(--text-dim);">프론트엔드 · v1.1.9</span>
+              <div class="ds-row" style="margin: 0;">
+                <button class="ds-btn success clicked">patch · v1.1.10</button>
+                <button class="ds-btn primary">minor · v1.2.0</button>
+                <button class="ds-btn danger">major · v2.0.0</button>
+              </div>
+            </div>
+            <div style="display: grid; grid-template-columns: 160px 1fr; gap: 8px; align-items: center;">
+              <span style="font-size: 11px; color: var(--text-dim);">
+                어드민 대시보드 · <span style="color:var(--warn);">초기 (tag 없음)</span>
+              </span>
+              <div class="ds-row" style="margin: 0;">
+                <button class="ds-btn success clicked">patch · v1.4.2</button>
+                <button class="ds-btn primary">minor · v1.5.0</button>
+                <button class="ds-btn danger">major · v2.0.0</button>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-top: 8px; padding: 6px 10px; background: rgba(245, 179, 95, 0.08); border-left: 2px solid var(--warn); border-radius: 0 3px 3px 0; font-size: 10.5px; color: var(--text-dim);">
+            <b style="color: var(--warn);">어드민 대시보드 — 첫 릴리즈</b>: git tag 없음. VERSION 파일 기준(v1.4.1) +bump해서 첫 tag 생성. CompareCommits base 없으니 main 전체 커밋 사용 (또는 최근 N일).
+          </div>
+
+          <div class="ds-row" style="margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border);">
+            <button class="ds-btn success" style="font-weight: 700;">확인 (4 모듈 진행)</button>
+            <button class="ds-btn secondary">뒤로</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note-callout"><b>UI 정책</b>: 모듈명 + 현재 버전 라벨(왼쪽) + 3 bump button(오른쪽). Discord row max 5 button — bump 3 + 모듈명은 row 안에서 분리하면 12 button 모두 한 메시지에 OK.</div>
+  </div>
+</div>
+
+<!-- ============ STEP 4-A: 일괄 confirm ============ -->
+<div class="step">
+  <div class="step-num"><div class="n" style="background: var(--good); color: #102014;">4A</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">일괄 confirm — 4 모듈 종합 미리보기</div>
+    <div class="step-trigger">봇 embed (4 모듈 + 각 새 버전 + 합계) <span class="arrow">→</span> 사용자 [확인]</div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="embed">
+            <div class="embed-title">전체 릴리즈 — 4 모듈 일괄 PR 생성</div>
+            <dl class="embed-fields">
+              <dt>프로덕트 API</dt><dd><code>v1.1.4</code> → <code>v1.1.5</code> · patch · <span style="color:var(--text-muted);font-size:10.5px;">bottle-note-api-server</span></dd>
+              <dt>어드민 API</dt><dd><code>v1.1.4</code> → <code>v1.2.0</code> · minor · <span style="color:var(--text-muted);font-size:10.5px;">bottle-note-api-server</span></dd>
+              <dt>프론트엔드</dt><dd><code>v1.1.9</code> → <code>v1.1.10</code> · patch · <span style="color:var(--text-muted);font-size:10.5px;">bottle-note-frontend</span></dd>
+              <dt>어드민 대시보드</dt><dd>
+                (첫 tag) → <code>v1.4.2</code> · patch · <span style="color:var(--text-muted);font-size:10.5px;">admin-dashboard</span>
+                <span style="color:var(--warn);font-size:10.5px;margin-left:6px;">⚠ 첫 릴리즈</span>
+              </dd>
+            </dl>
+            <div class="embed-meta">
+              모듈마다 5단계(diff/LLM/VERSION/tag/PR) 진행. 4 goroutine 동시 실행 — 약 30~60초 예상.<br/>
+              부분 실패 시 성공한 모듈은 PR 살림 (사용자가 GitHub에서 수동 close 결정).
+            </div>
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn success clicked">확인 (4 모듈 일괄 진행)</button>
+            <button class="ds-btn secondary">뒤로</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 5-A: 일괄 progress ============ -->
+<div class="step">
+  <div class="step-num"><div class="n" style="background: var(--good); color: #102014;">5A</div><div class="line"></div></div>
+  <div class="step-content">
+    <div class="step-title">일괄 progress — 4 모듈 동시 진행 (단일 메시지 갱신)</div>
+    <div class="step-trigger">봇 progress 메시지 1건 (1.5초마다 edit) — 각 모듈 별 독립 5단계 표시</div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="disco-body">전체 릴리즈 진행 중 (4 모듈) · 18초 경과</div>
+          <div class="progress-state">
+            <div class="progress" style="color: var(--good);">[●●●●●] 프로덕트 API → v1.1.5 · <b>완료</b> · PR <code>#143</code></div>
+            <div class="progress">[●●●●○] 어드민 API → v1.2.0 · 단계 4/5 (git tag)</div>
+            <div class="progress">[●●●○○] 프론트엔드 → v1.1.10 · 단계 3/5 (VERSION commit)</div>
+            <div class="progress">[●●○○○] 어드민 대시보드 → v1.4.2 · 단계 2/5 (LLM 본문 생성) · <span style="color:var(--warn);">첫 tag 생성</span></div>
+          </div>
+          <div class="disco-body muted" style="margin-top: 6px;">⤴ 단일 메시지 1.5초 edit · 모듈은 goroutine 4개 동시 실행 (rate limit 안전선 안)</div>
+        </div>
+      </div>
+    </div>
+    <div class="note-callout"><b>병렬 처리</b>: 4 goroutine 동시 진행 (GitHub API rate limit: 5000 req/h, 충분). LLM 호출도 4개 동시(OpenAI rate limit 안전).</div>
+  </div>
+</div>
+
+<!-- ============ STEP 6-A: 결과 ============ -->
+<div class="step">
+  <div class="step-num"><div class="n" style="background: var(--good); color: #102014;">6A</div></div>
+  <div class="step-content">
+    <div class="step-title">결과 메시지 — 4 PR URL + 합계</div>
+    <div class="step-trigger">봇이 결과 embed (이전 progress 삭제) <span class="arrow">→</span> 사용자가 PR 4개 외부 링크로 확인 가능</div>
+    <div class="disco">
+      <div class="disco-msg">
+        <div class="disco-avatar bot">B</div>
+        <div>
+          <div class="disco-name">ChatBot-Alpha-1<span class="tag">앱</span></div>
+          <div class="embed" style="border-left-color: var(--good);">
+            <div class="embed-title" style="color: var(--good);">✓ 전체 릴리즈 PR 4건 생성 완료</div>
+            <dl class="embed-fields">
+              <dt>프로덕트 API</dt><dd><code>#143</code> v1.1.5 — <a href="#" style="color:var(--accent);">PR 열기</a></dd>
+              <dt>어드민 API</dt><dd><code>#144</code> v1.2.0 — <a href="#" style="color:var(--accent);">PR 열기</a></dd>
+              <dt>프론트엔드</dt><dd><code>#412</code> v1.1.10 — <a href="#" style="color:var(--accent);">PR 열기</a></dd>
+              <dt>어드민 대시보드</dt><dd>
+                <code>#89</code> v1.4.2 — <a href="#" style="color:var(--accent);">PR 열기</a>
+                <span style="color:var(--good);font-size:10.5px;margin-left:6px;">✓ 첫 tag dashboard/v1.4.2 생성</span>
+              </dd>
+            </dl>
+            <div class="embed-meta">
+              합계: 28 commits · 4 PR · 약 35초 · auto-merge 없음 (각 PR 수동 review/merge 필요)
+            </div>
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn primary">전체 PR 한 번에 열기 (4 외부 링크)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note-callout"><b>SubAction 통합</b>: 결과 markdown 1건이 <code>SourceReleaseResult</code>로 sess.Notes 누적 (4 PR 합본 한 노트). corpus의 ContextNotes로 분류.</div>
+
+    <div style="margin-top: 8px; padding: 8px 10px; background: rgba(245, 107, 107, 0.06); border-left: 2px solid var(--danger); border-radius: 0 3px 3px 0; font-size: 10.5px; color: var(--text-dim);">
+      <b style="color: var(--danger);">부분 실패 시</b>: 4 모듈 중 일부만 실패하면 결과 embed에 <code>✗ fe — VERSION commit 실패: ...</code> 식으로 모듈별 상태 표시. 성공한 PR은 살림 (사용자 수동 close 결정).
+    </div>
+  </div>
+</div>
+
+<!-- ============ STEP 7-A: sticky 재발사 (단일 흐름과 동일) ============ -->
+<div class="step">
+  <div class="step-num"><div class="n" style="background: var(--good); color: #102014;">7A</div></div>
+  <div class="step-content">
+    <div class="step-title">sticky 재발사 (단일 흐름의 STEP 8과 동일)</div>
+    <div class="step-trigger">봇이 V4 sticky를 맨 아래로 다시 push · 메모 4건 → <code>5건</code> (release segment +1)</div>
+    <div class="disco-body muted" style="padding: 10px;">
+      ↑ 위 STEP 8과 같은 V4 sticky 카드 (메모 카운트만 +1). 사용자가 다음 액션 button 즉시 접근.
+    </div>
+  </div>
+</div>
+
+<div style="margin-top: 24px; padding: 14px 16px; background: var(--bg-card); border-left: 3px solid var(--good); border-radius: 0 8px 8px 0; font-size: 12px; color: var(--text-dim);">
+  <strong style="color: var(--good);">전체 분기 확정 항목</strong>:<br/>
+  · 라인 button: <code>[백엔드][프론트엔드][전체][뒤로]</code> 4개<br/>
+  · 대상 모듈 (모두 일괄 대상, 일관 한글 라벨):<br/>
+  &nbsp;&nbsp;&nbsp;&nbsp;1. <b>프로덕트 API</b> — <code>bottle-note-api-server</code> · 등록됨<br/>
+  &nbsp;&nbsp;&nbsp;&nbsp;2. <b>어드민 API</b> — <code>bottle-note-api-server</code> · 등록됨<br/>
+  &nbsp;&nbsp;&nbsp;&nbsp;3. <b>프론트엔드</b> — <code>bottle-note-frontend</code> · <span style="color:var(--warn);">신규 등록 필요</span> (tag/branch/VERSION 모두 준비됨)<br/>
+  &nbsp;&nbsp;&nbsp;&nbsp;4. <b>어드민 대시보드</b> — <code>admin-dashboard</code> · <span style="color:var(--danger);">신규 등록 + 첫 릴리즈 처리 필요</span> (tag 없음, VERSION만 있음 v1.4.1)<br/>
+  · bump UI: 모듈마다 row (모듈명+버전 + 3 bump button), default = patch<br/>
+  · 진행: 4 goroutine 동시 (5단계 × 4 모듈 = 20 step, 약 30~60초)<br/>
+  · progress 메시지: 단일 메시지에 4 모듈 상태 동시 표시<br/>
+  · 부분 실패: 모듈별 독립 — 성공한 PR은 살림<br/>
+  <br/>
+  <strong style="color: var(--accent);">신규 작업 (이번 PR에 포함)</strong>:<br/>
+  &nbsp;&nbsp;<b>a.</b> <code>release.Modules</code>에 frontend + dashboard 등록 (코드 주석의 TODO 살리기)<br/>
+  &nbsp;&nbsp;<b>b.</b> <span style="color:var(--warn);">첫 릴리즈 케이스</span> — <code>PrevTag</code> 없을 때 fallback: VERSION 파일 기준으로 +bump해서 첫 tag 생성 + CompareCommits base 없이 main 최근 N일 commits 사용<br/>
+  &nbsp;&nbsp;<b>c.</b> 라인 [전체] button + per-module bump 선택 UI + 4 goroutine 병렬 + 합본 결과
+</div>
+
+</body>
+</html>

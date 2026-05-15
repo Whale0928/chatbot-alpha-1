@@ -167,13 +167,16 @@ func (v Version) Compare(o Version) int {
 
 // Modules 는 실제 보틀노트 운영 레포의 릴리즈 모듈 레지스트리.
 //
-// 1차 도입 범위는 **백엔드 라인 한정** — 백엔드 모듈들은 동일 모노레포(bottle-note-api-server)의
-// 서브디렉토리이며 태그/브랜치 컨벤션이 일관된다 ("{prefix}/v1.2.3", release/{prefix}).
+// 등록 범위:
+//   - 백엔드 (bottle-note-api-server 모노레포): product / admin
+//   - 프론트엔드: frontend (bottle-note-frontend) / dashboard (admin-dashboard)
 //
-// 프론트엔드 라인(frontend, dashboard)은 운영 합의 후 등록한다. 아래 TODO 블록 참고.
+// 백엔드 모듈은 동일 모노레포의 서브디렉토리이며 태그/브랜치 컨벤션 일관 ("{prefix}/v1.2.3", release/{prefix}).
+// 프론트엔드 모듈은 별도 레포 — owner/repo 다르고, dashboard 는 아직 첫 릴리즈 미수행 상태.
+// 첫 릴리즈 fallback은 봇이 PrevTagCommitSHA 비어있음을 감지해 main HEAD SHA에서 release/* 브랜치를 생성한다 (B-2).
 //
-// 주의: batch 는 아직 git tag 도, release/batch 브랜치도 존재하지 않는다.
-// 첫 릴리즈 케이스를 봇 흐름이 지원하지 않으므로 일단 등록에서 제외했다.
+// 주의 (batch): batch 는 아직 git tag 도, release/batch 브랜치도 존재하지 않으며 별도 모듈 정비 합의 필요.
+// 첫 릴리즈 fallback이 적용되더라도 배포 자동화 합의(HasDeploy)가 별도이므로 일단 등록 보류.
 var Modules = []Module{
 	{
 		Key:           "product",
@@ -197,12 +200,38 @@ var Modules = []Module{
 		ReleaseBranch: "release/admin",
 		HasDeploy:     true,
 	},
+	{
+		// bottle-note-frontend — VERSION 파일/태그/release 브랜치 모두 존재하는 정상 운영 레포.
+		// ReleaseBranch는 단일 분기명("release") — 프론트 운영 합의 (백엔드의 release/{prefix} 와 다름).
+		Key:           "frontend",
+		Line:          LineFrontend,
+		DisplayName:   "프론트엔드",
+		Owner:         "bottle-note",
+		Repo:          "bottle-note-frontend",
+		VersionPath:   "VERSION",
+		TagPrefix:     "frontend",
+		ReleaseBranch: "release",
+		HasDeploy:     true,
+	},
+	{
+		// admin-dashboard — VERSION 파일은 있으나 git tag 없음 = 첫 릴리즈 시나리오.
+		// runReleaseFlow의 first-release fallback (B-2)이 PrevTagCommitSHA 비어있음을 감지해
+		// main HEAD SHA에서 release/dashboard 브랜치를 자동 생성, ListCommits(지난 30일)로 노트 생성.
+		Key:           "dashboard",
+		Line:          LineFrontend,
+		DisplayName:   "어드민 대시보드",
+		Owner:         "bottle-note",
+		Repo:          "admin-dashboard",
+		VersionPath:   "VERSION",
+		TagPrefix:     "dashboard",
+		ReleaseBranch: "release/dashboard",
+		HasDeploy:     true,
+	},
 	// TODO(batch): batch 모듈 측 정비 후 등록.
 	// 필요한 사전 조건:
-	//   1. 초기 git tag (예: batch/v0.0.0) — 현재 ListTags 결과 batch/* 없음
-	//   2. release/batch 브랜치 생성 + protected 설정
-	//   3. 배포 자동화 합의 (HasDeploy true/false)
-	// 위 3개가 정해지면 아래 블록을 살리면 된다.
+	//   1. release/batch 브랜치 생성 + protected 설정
+	//   2. 배포 자동화 합의 (HasDeploy true/false)
+	// (git tag 부재는 B-2 first-release fallback이 처리 — 더 이상 차단 사유 X.)
 	// {
 	//     Key:           "batch",
 	//     Line:          LineBackend,
@@ -213,31 +242,6 @@ var Modules = []Module{
 	//     TagPrefix:     "batch",
 	//     ReleaseBranch: "release/batch",
 	//     HasDeploy:     false,
-	// },
-	// TODO(frontend): 프론트엔드 라인 도입 시 등록.
-	// 별도 레포(bottle-note-frontend, admin-dashboard)라 owner/repo 가 백엔드와 다르다.
-	// dashboard 는 아직 git tag 자체가 없어 TagPrefix 합의(기본안: "dashboard") 필요.
-	// {
-	//     Key:           "frontend",
-	//     Line:          LineFrontend,
-	//     DisplayName:   "프론트엔드",
-	//     Owner:         "bottle-note",
-	//     Repo:          "bottle-note-frontend",
-	//     VersionPath:   "VERSION",
-	//     TagPrefix:     "frontend",
-	//     ReleaseBranch: "release",
-	//     HasDeploy:     true,
-	// },
-	// {
-	//     Key:           "dashboard",
-	//     Line:          LineFrontend,
-	//     DisplayName:   "어드민 대시보드",
-	//     Owner:         "bottle-note",
-	//     Repo:          "admin-dashboard",
-	//     VersionPath:   "VERSION",
-	//     TagPrefix:     "dashboard",
-	//     ReleaseBranch: "release/dashboard",
-	//     HasDeploy:     true,
 	// },
 }
 
