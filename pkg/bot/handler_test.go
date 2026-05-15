@@ -93,16 +93,20 @@ type fakeSummarizer struct {
 	interimCalls int
 
 	// Phase 2 — ExtractContent
-	extractResp  *llm.SummarizedContent
-	extractErr   error
-	extractCalls int
-	lastExtract  summarize.ContentExtractionInput
+	extractContentResp *llm.SummarizedContent
+	extractResp        *llm.SummarizedContent // legacy alias
+	extractErr         error
+	extractCalls       int
+	lastExtract        summarize.ContentExtractionInput
 
 	// Phase A — RenderFormat
-	renderFormatResp  string
+	renderFormatResps map[llm.NoteFormat]string
+	renderFormatResp  string // legacy fallback
 	renderFormatErr   error
 	renderFormatCalls int
 	lastRenderFormat  summarize.FormatRenderInput
+
+	callCounts map[string]int
 
 	// capture inputs
 	lastNotes     []llm.Note
@@ -110,8 +114,16 @@ type fakeSummarizer struct {
 	lastDirective string
 }
 
+func (f *fakeSummarizer) countCall(name string) {
+	if f.callCounts == nil {
+		return
+	}
+	f.callCounts[name]++
+}
+
 func (f *fakeSummarizer) SummarizeMeeting(_ context.Context, notes []llm.Note, speakers []string, _ time.Time) (*llm.FinalNoteResponse, error) {
 	f.calls++
+	f.countCall("SummarizeMeeting")
 	f.lastNotes = notes
 	f.lastSpeakers = speakers
 	return f.response, f.err
@@ -119,6 +131,7 @@ func (f *fakeSummarizer) SummarizeMeeting(_ context.Context, notes []llm.Note, s
 
 func (f *fakeSummarizer) SummarizeDecisionStatus(_ context.Context, notes []llm.Note, speakers []string, _ time.Time, directive string) (*llm.DecisionStatusResponse, error) {
 	f.decisionStatusCalls++
+	f.countCall("SummarizeDecisionStatus")
 	f.lastNotes = notes
 	f.lastSpeakers = speakers
 	f.lastDirective = directive
@@ -127,6 +140,7 @@ func (f *fakeSummarizer) SummarizeDecisionStatus(_ context.Context, notes []llm.
 
 func (f *fakeSummarizer) SummarizeDiscussion(_ context.Context, notes []llm.Note, speakers []string, _ time.Time, directive string) (*llm.DiscussionResponse, error) {
 	f.discussionCalls++
+	f.countCall("SummarizeDiscussion")
 	f.lastNotes = notes
 	f.lastSpeakers = speakers
 	f.lastDirective = directive
@@ -135,6 +149,7 @@ func (f *fakeSummarizer) SummarizeDiscussion(_ context.Context, notes []llm.Note
 
 func (f *fakeSummarizer) SummarizeRoleBased(_ context.Context, notes []llm.Note, speakers []string, _ time.Time, directive string) (*llm.RoleBasedResponse, error) {
 	f.roleBasedCalls++
+	f.countCall("SummarizeRoleBased")
 	f.lastNotes = notes
 	f.lastSpeakers = speakers
 	f.lastDirective = directive
@@ -143,6 +158,7 @@ func (f *fakeSummarizer) SummarizeRoleBased(_ context.Context, notes []llm.Note,
 
 func (f *fakeSummarizer) SummarizeFreeform(_ context.Context, notes []llm.Note, speakers []string, _ time.Time, directive string) (*llm.FreeformResponse, error) {
 	f.freeformCalls++
+	f.countCall("SummarizeFreeform")
 	f.lastNotes = notes
 	f.lastSpeakers = speakers
 	f.lastDirective = directive
@@ -151,6 +167,7 @@ func (f *fakeSummarizer) SummarizeFreeform(_ context.Context, notes []llm.Note, 
 
 func (f *fakeSummarizer) SummarizeInterim(_ context.Context, notes []llm.Note, speakers []string, _ time.Time) (*llm.InterimNoteResponse, error) {
 	f.interimCalls++
+	f.countCall("SummarizeInterim")
 	f.lastNotes = notes
 	f.lastSpeakers = speakers
 	return f.interimResp, f.interimErr
@@ -160,8 +177,27 @@ func (f *fakeSummarizer) SummarizeInterim(_ context.Context, notes []llm.Note, s
 // 호출 횟수와 입력 input을 캡처해 테스트가 검증.
 func (f *fakeSummarizer) ExtractContent(_ context.Context, in summarize.ContentExtractionInput) (*llm.SummarizedContent, error) {
 	f.extractCalls++
+	f.countCall("ExtractContent")
 	f.lastExtract = in
+	if f.extractContentResp != nil {
+		return f.extractContentResp, f.extractErr
+	}
 	return f.extractResp, f.extractErr
+}
+
+func (f *fakeSummarizer) RenderFormat(_ context.Context, in summarize.FormatRenderInput) (string, error) {
+	f.renderFormatCalls++
+	f.countCall("RenderFormat:" + in.Format.String())
+	f.lastRenderFormat = in
+	if f.renderFormatErr != nil {
+		return "", f.renderFormatErr
+	}
+	if f.renderFormatResps != nil {
+		if out, ok := f.renderFormatResps[in.Format]; ok {
+			return out, nil
+		}
+	}
+	return f.renderFormatResp, nil
 }
 
 func newTestSession() *Session {

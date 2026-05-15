@@ -61,12 +61,6 @@ func newBotTestDB(t *testing.T) *db.DB {
 	return d
 }
 
-func (f *fakeSummarizer) RenderFormat(_ context.Context, in summarize.FormatRenderInput) (string, error) {
-	f.renderFormatCalls++
-	f.lastRenderFormat = in
-	return f.renderFormatResp, f.renderFormatErr
-}
-
 type formatToggleSummarizer struct {
 	fakeSummarizer
 	renderFormatCalls int
