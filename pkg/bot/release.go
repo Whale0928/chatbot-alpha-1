@@ -125,6 +125,16 @@ type ReleaseContext struct {
 	// access이므로 atomic.Bool 사용 (평범한 bool은 -race 검출됨, 운영 중 가드 flaky 위험).
 	// lifecycle: runReleaseFlow Store(true) → defer Store(false). 가드는 Load()로 in-flight 판정.
 	InProgress atomic.Bool
+
+	// Failed는 runReleaseFlow가 에러로 종료됐는지 표시 (codex review 4차 P2 fix).
+	//
+	// 배경: 3차 fix에서 updateProgressError의 sess.ReleaseCtx = nil cleanup을 race 위험으로 제거 →
+	// 실패한 ctx가 sess에 남고 원래 confirmation 메시지의 [확인] button이 살아있음 → stale FileSHA/Tag로
+	// 재실행되어 GitHub 중복 operation 위험.
+	//
+	// updateProgressError가 background goroutine에서 Store(true), handleReleaseConfirm이 Load()로 reject.
+	// lifecycle 단방향 — 한 번 Failed=true가 되면 그 ctx는 사용 불가, 새 ctx를 만들어야 재시도 가능.
+	Failed atomic.Bool
 }
 
 // IsFirstRelease는 module.TagPrefix 매칭 태그가 0개였던 첫 릴리즈 시나리오인지 판단한다.
@@ -527,6 +537,23 @@ func handleReleaseConfirm(s *discordgo.Session, i *discordgo.InteractionCreate, 
 		respondInteraction(s, i, "릴리즈 컨텍스트가 만료되었습니다. sticky의 [릴리즈 PR 만들기] button으로 다시 시작해주세요.")
 		return
 	}
+	// codex 4차 P2 fix: 실패 종료된 ctx의 stale [확인] 버튼 재클릭 reject — stale FileSHA/Tag로 재실행하면
+	// GitHub 중복 commit/tag/PR 위험. 사용자는 sticky의 [릴리즈 PR 만들기]를 다시 눌러 새 ctx로 시작해야 함.
+	if rc.Failed.Load() {
+		logGuard("release", "stale_failed_ctx", "실패한 release ctx의 [확인] button 재클릭 — reject",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+			lf("module", rc.Module.Key), lf("step", rc.LastStep))
+		respondInteraction(s, i, "이전 release가 실패한 상태입니다. sticky의 [릴리즈 PR 만들기]로 새로 시작해주세요. (stale 컨텍스트 재실행은 GitHub 중복 작업 위험으로 차단)")
+		return
+	}
+	// 동일 ctx의 [확인] 중복 클릭 reject — 이미 진행 중이면 두 번째 click이 새 progress 메시지 + 새 goroutine 발사하는 race 방어.
+	if rc.InProgress.Load() {
+		logGuard("release", "double_confirm", "[확인] button 중복 click — 이미 진행 중",
+			lf("thread", sess.ThreadID), lf("user", interactionCallerUsername(i)),
+			lf("module", rc.Module.Key))
+		respondInteraction(s, i, "이미 release가 진행 중입니다. 완료 후 다시 시도해주세요.")
+		return
+	}
 
 	// ack — 진행 표시 메시지는 별도 channel send
 	respondInteraction(s, i, fmt.Sprintf("`%s` 릴리즈를 진행합니다. (`v%s` → `v%s`)",
@@ -878,6 +905,10 @@ func updateProgressError(s *discordgo.Session, sess *Session, rc *ReleaseContext
 	// mutate하면 interaction handler 동시 read와 race. runReleaseFlow defer가 InProgress.Store(false)로
 	// lifecycle을 표시하므로 가드는 InProgress.Load()로 abandoned 처리 가능. 다음 sticky 진입 시
 	// customIDSubActionRelease handler가 sess.ReleaseCtx = nil을 main goroutine에서 정리.
+	//
+	// 4차 P2 fix: 추가로 rc.Failed.Store(true)로 stale [확인] button의 재실행 차단.
+	// handleReleaseConfirm이 Failed=true를 감지해 reject — sess.ReleaseCtx에 남아 있어도 재실행 X.
+	rc.Failed.Store(true)
 	if sess.Mode == ModeMeeting {
 		sendSticky(s, sess)
 	}

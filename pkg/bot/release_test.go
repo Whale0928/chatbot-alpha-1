@@ -132,3 +132,34 @@ func Test_BatchReleaseContext_InProgress_CompareAndSwap_단일_진입(t *testing
 		t.Error("CompareAndSwap 후 InProgress가 true가 아님")
 	}
 }
+
+// Test_ReleaseContext_Failed_lifecycle은 Failed atomic.Bool이 한 번 set되면 false로 안 돌아오는지 검증.
+// (codex 4차 P2 fix — 실패한 ctx의 stale 재실행 방어).
+func Test_ReleaseContext_Failed_lifecycle(t *testing.T) {
+	rc := &ReleaseContext{}
+	if rc.Failed.Load() {
+		t.Error("초기 Failed는 false여야 함")
+	}
+	rc.Failed.Store(true)
+	if !rc.Failed.Load() {
+		t.Error("Store(true) 후 Failed=true여야 함")
+	}
+	// 의도적 단방향 — 외부에서 false로 reset하지 않음을 컨벤션으로. atomic.Bool 자체는 reset 가능하나
+	// updateProgressError만 set하고 그 외엔 set/reset하지 않음.
+}
+
+// Test_ReleaseContext_Failed_동시_set_load는 Failed의 cross-goroutine atomic 안전성 검증 (-race).
+func Test_ReleaseContext_Failed_동시_set_load(t *testing.T) {
+	rc := &ReleaseContext{}
+	var wg sync.WaitGroup
+	const N = 200
+	for i := 0; i < N; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); rc.Failed.Store(true) }()
+		go func() { defer wg.Done(); _ = rc.Failed.Load() }()
+	}
+	wg.Wait()
+	if !rc.Failed.Load() {
+		t.Error("최종 Failed=true여야 함 (모든 Store가 true)")
+	}
+}
