@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"chatbot-alpha-1/pkg/db"
 	"chatbot-alpha-1/pkg/github"
 	"chatbot-alpha-1/pkg/llm"
 	"chatbot-alpha-1/pkg/llm/render"
@@ -212,6 +213,43 @@ func extractWeeklyScope(id string) (llm.WeeklyScope, bool) {
 // scope에 따라 fetch가 분기된다 — Issues는 커밋 fetch를 생략, Commits는 이슈 fetch 생략, Both는 둘 다.
 // 결과 메시지 끝에 follow-up 버튼을 자동 첨부하고 sess에 컨텍스트(scope 포함)를 박제한다.
 func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, since, until time.Time, directive string, scope llm.WeeklyScope) {
+	// === Phase 3 chunk 3B-2b — super-session in-thread 통합 ===
+	// 미팅 모드(super-session)에서 호출됐을 때만 SubAction lifecycle 적용:
+	//   - segments row insert (BeginSubAction)
+	//   - 결과를 NoteSource=WeeklyDump로 sess.Notes 누적 (AppendResult)
+	//   - segment 종료 + artifact persist (defer EndWithArtifact)
+	// legacy 흐름(메인 채널 [주간 정리])은 ModeNormal이라 후크 미발동 = 기존 동작 그대로 보존.
+	//
+	// Context 정책 (review C1 반영):
+	//   - Begin: 5초 짧은 timeout (DB insert 1회만 보호)
+	//   - Append/End: 함수 수명 독립의 새 context — runWeeklyAnalyze는 GitHub fetch(30s) + LLM(90s)
+	//     이라 begin context를 그대로 쓰면 항상 cancelled 상태에서 종료 → DB persist 실패.
+	var (
+		sa            *SubActionContext
+		issues        []github.Issue
+		commits       []github.Commit
+		renderedFinal string
+	)
+	if sess.Mode == ModeMeeting {
+		beginCtx, beginCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sa = BeginSubAction(beginCtx, sess, db.SegmentWeeklySummary)
+		beginCancel()
+		defer func() {
+			// EndCtx는 runWeeklyAnalyze 수명과 독립 — 함수 끝난 후에도 짧게 살아있어야 DB end가 성공.
+			endCtx, endCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer endCancel()
+			sa.EndWithArtifact(endCtx, map[string]any{
+				"repo":           fullName,
+				"since":          since.Unix(),
+				"until":          until.Unix(),
+				"scope":          scope.String(),
+				"issues_count":   len(issues),
+				"commits_count":  len(commits),
+				"rendered_runes": len([]rune(renderedFinal)),
+			})
+		}()
+	}
+
 	owner, name, ok := splitRepoFullName(fullName)
 	if !ok {
 		s.ChannelMessageSend(sess.ThreadID, fmt.Sprintf("잘못된 레포 식별자: `%s`", fullName))
@@ -230,11 +268,9 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 	ghCtx, ghCancel := context.WithTimeout(context.Background(), weeklyGitHubTimeout)
 	defer ghCancel()
 
-	var (
-		issues  []github.Issue
-		commits []github.Commit
-		err     error
-	)
+	// issues/commits는 super-session 통합용 outer var (위 SubAction defer가 capture).
+	// 단순 weekly에서도 동일 변수 사용.
+	var err error
 	if scope.IncludesIssues() {
 		issues, err = githubClient.ListIssues(ghCtx, owner, name, github.ListIssuesOptions{State: "open"})
 		if err != nil {
@@ -291,8 +327,24 @@ func runWeeklyAnalyze(s *discordgo.Session, sess *Session, fullName string, sinc
 		CommitCount:  len(commits),
 		Response:     resp,
 	})
-	if _, err := sendLongMessageWithComponents(s, sess.ThreadID, rendered, weeklyFollowupComponents(len(resp.Closeable), scope)); err != nil {
-		log.Printf("[주간/send] ERR repo=%s: %v", fullName, err)
+	sendErr := func() error {
+		_, e := sendLongMessageWithComponents(s, sess.ThreadID, rendered, weeklyFollowupComponents(len(resp.Closeable), scope))
+		return e
+	}()
+	if sendErr != nil {
+		log.Printf("[주간/send] ERR repo=%s (corpus 미누적 — 사용자 미수신): %v", fullName, sendErr)
+	}
+
+	// === Phase 3 chunk 3B-2b — super-session corpus 누적 ===
+	// rendered markdown을 NoteSource=WeeklyDump로 sess에 추가 → finalize의 ContextNotes로 분류 →
+	// 정리본 추출 시 LLM에 참고 자료로 전달되되 action.origin 후보 X (환각 방어).
+	//
+	// 전송 실패 시 누적 스킵 (review I3 반영) — 사용자가 보지 못한 분석이 정리본에 영향을 주는 것 차단.
+	renderedFinal = rendered // defer EndWithArtifact가 capture
+	if sa != nil && sendErr == nil {
+		appendCtx, appendCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sa.AppendResult(appendCtx, sess, "[weekly]", db.SourceWeeklyDump, rendered)
+		appendCancel()
 	}
 
 	// 4) 세션 컨텍스트 박제 + 처음 메뉴 사용 가능 상태로 돌려놓음

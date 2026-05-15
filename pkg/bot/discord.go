@@ -228,12 +228,27 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			log.Printf("[미팅/end] 세션 보존 (재시도 대기) thread=%s", sess.ThreadID)
 		}
 
-	// === Phase 3 chunk 3B-1 — super-session sub-action button (stub) ===
-	// 본격 구현은 chunk 3B-2 (이 스레드 안에서 실행 + segment 누적, 같은 corpus에 합쳐짐).
-	// stub은 거시 결정 1(같은 스레드 컨테이너) 모델과 일관되게 안내 — 사용자에게 "메인 채널로 가라"
-	// 안내하지 않음 (그러면 컨텍스트 분리 = 결정 1 위반).
+	// === Phase 3 chunk 3B-2b — [주간 추가] in-thread 통합 ===
+	// super-session sticky의 [주간 추가] 클릭 → 같은 스레드에 레포 선택 button 노출.
+	// 사용자가 레포 선택하면 기존 handleWeeklyRepoSelect → runWeeklyAnalyze 흐름 발동.
+	// runWeeklyAnalyze는 sess.Mode == ModeMeeting 감지 시 SubAction lifecycle 적용 + 결과를
+	// NoteSource=WeeklyDump로 sess.Notes에 누적 (corpus의 ContextNotes로 분류).
+	//
+	// TODO(Phase 3 후속): customIDSubActionWeekly로 발급된 레포 button과 legacy mode_weekly로
+	// 발급된 button이 customID(weekly_repo:owner/name)만 봐서는 구분 불가. 현재는 super-session
+	// sticky가 ModeMeeting 스레드에만 노출되므로 피해 제한적이지만, 구조적 취약점 — 향후 customID에
+	// 진입 모드 정보 포함(예: weekly_repo:in_thread:owner/name) 또는 sess.PendingWeeklyRepo에 mode
+	// 정보 함께 박제하는 식으로 보강 필요.
 	case customIDSubActionWeekly:
-		respondInteraction(s, i, "[주간 추가]는 이 스레드 안에서 주간 분석을 실행해 결과를 같은 corpus에 누적합니다. Phase 3 chunk 3B-2에서 활성화 예정입니다.")
+		log.Printf("[미팅/subaction_weekly] thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
+		if len(weeklyRepos) == 0 {
+			respondInteraction(s, i, "분석 가능한 레포가 등록되어 있지 않습니다 (git_server.go의 weeklyRepos 확인).")
+			return
+		}
+		header := fmt.Sprintf("주간 분석할 레포를 선택해주세요. 결과는 이 스레드의 corpus에 누적됩니다. (등록된 레포: %d개)", len(weeklyRepos))
+		respondInteractionWithComponents(s, i, header, buildWeeklyRepoRows(weeklyRepos))
+
+	// === Phase 3 chunk 3B-2c — [릴리즈 추가]/[에이전트] 후속 ===
 	case customIDSubActionRelease:
 		respondInteraction(s, i, "[릴리즈 추가]는 이 스레드 안에서 릴리즈 작업을 실행해 결과를 같은 corpus에 누적합니다. Phase 3 chunk 3B-2에서 활성화 예정입니다.")
 	case customIDSubActionAgent:
