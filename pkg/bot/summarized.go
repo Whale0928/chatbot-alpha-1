@@ -245,10 +245,15 @@ func FinalizeSummarized(
 	defaultFormat := llm.FormatDecisionStatus
 	rendered := renderSummarizedByFormat(content, defaultFormat, in.Speakers, in.SpeakerRoles, now)
 
-	// 정리본 메시지 전송 — content + 4 포맷 토글 button row 첨부.
-	// Messenger.ChannelMessageSendComplex는 인터페이스에 정의돼 있고 fakeMessenger도 구현 중.
+	// 정리본 메시지 전송 — embed로 보내 Discord 4096자 한도 활용 (plain content는 2000자 한도).
+	// 운영 사고(2026-05-15): plain content로 보내다 LLM 출력이 2000자 초과 시 HTTP 400 →
+	// "정리본을 추출하는 중..." stuck. embed.Description은 4096자라 대부분 케이스 커버.
+	embed, truncated := buildSummarizedEmbed(rendered)
+	if truncated {
+		log.Printf("[미팅/finalize_summarized] WARN rendered가 4096자 초과 — truncate (원본 %d자)", len([]rune(rendered)))
+	}
 	if _, err := msg.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
-		Content:    rendered,
+		Embeds:     []*discordgo.MessageEmbed{embed},
 		Components: formatToggleComponents(defaultFormat),
 	}); err != nil {
 		log.Printf("[미팅/finalize_summarized] ERR 정리본+토글 전송 실패: %v", err)
@@ -421,9 +426,16 @@ func HandleFormatToggle(
 
 	rendered := renderSummarizedByFormat(&content, format, speakers, rolesCopy, scRow.ExtractedAt)
 
-	// 메시지 edit — interaction의 원본 메시지 갱신
+	// 메시지 edit — interaction의 원본 메시지를 embed로 갱신 (FinalizeSummarized 초기 send와 동일 형식).
+	// content 필드 비우고 embeds로 교체 — Discord는 둘 중 하나만 있어도 OK.
+	embed, truncated := buildSummarizedEmbed(rendered)
+	if truncated {
+		log.Printf("[미팅/format_toggle] WARN rendered가 4096자 초과 — truncate (원본 %d자)", len([]rune(rendered)))
+	}
+	emptyContent := ""
 	editMsg := &discordgo.WebhookEdit{
-		Content:    &rendered,
+		Content:    &emptyContent,
+		Embeds:     &[]*discordgo.MessageEmbed{embed},
 		Components: ptrComponents(formatToggleComponents(format)),
 	}
 	if _, err := s.InteractionResponseEdit(i.Interaction, editMsg); err != nil {
@@ -438,4 +450,34 @@ func HandleFormatToggle(
 
 	log.Printf("[미팅/format_toggle] 완료 thread=%s sc=%s format=%s rendered_bytes=%d",
 		sess.ThreadID, scRow.ID, format, len(rendered))
+}
+
+// buildSummarizedEmbed는 정리본 markdown을 Discord embed로 wrapping한다.
+//
+// Discord 한도:
+//   - plain content: 2000자 (기존 사용 — LLM 출력 길어지면 HTTP 400 reject로 stuck UX)
+//   - embed.Description: 4096자 (4x 큼) — 대부분 정리본 케이스 커버
+//
+// 4096자 초과 시 4090자에서 truncate + footer로 명시 안내 (sendLongMessage로 split하면 toggle UI가
+// 깨져서 — toggle은 InteractionResponseEdit가 단일 메시지 edit이라 multi-message split 호환 X).
+//
+// 반환 second value `truncated`는 호출자가 로그/메트릭에 사용.
+func buildSummarizedEmbed(rendered string) (*discordgo.MessageEmbed, bool) {
+	const maxDesc = 4090 // 안전 여유 6자 (footer/내부 메타에 한도 정확히 닿지 않게)
+	runes := []rune(rendered)
+	truncated := false
+	desc := rendered
+	if len(runes) > maxDesc {
+		desc = string(runes[:maxDesc]) + "…"
+		truncated = true
+	}
+	embed := &discordgo.MessageEmbed{
+		Description: desc,
+	}
+	if truncated {
+		embed.Footer = &discordgo.MessageEmbedFooter{
+			Text: fmt.Sprintf("정리본이 %d자 → 4090자에서 잘림 (Discord embed 한도). 전체는 DB summarized_contents에 보존.", len(runes)),
+		}
+	}
+	return embed, truncated
 }
