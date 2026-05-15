@@ -79,9 +79,17 @@ type ReleaseContext struct {
 	// BaseSHA는 release/* 브랜치 생성 시 base로 사용할 git SHA.
 	// 정상 케이스(태그 존재): PrevTagCommitSHA 그대로.
 	// 첫 릴리즈(B-2): runReleaseSteps Step 1에서 GetRef("heads/main").Object.SHA를 미리 캡처.
-	// 이는 codex review P1 수정 — Step 4가 UpdateFile 이후 main HEAD를 읽으면 release 브랜치가
-	// 새 VERSION 커밋과 같은 SHA가 되어 PR head/base가 동일 = "no commits between" 실패.
+	// Batch 모드(P1 isolation): 항상 main HEAD SHA로 캡처 (HeadBranch 생성 base + release 브랜치 first-release base).
 	BaseSHA string
+
+	// HeadBranch는 VERSION bump commit이 push될 head 브랜치 이름.
+	// 단일 모드: "" (빈 값) → main에 직접 commit (기존 동작).
+	// Batch 모드 (codex review 2차 P1 fix): "release-batch/<module-key>-v<new-version>" — 모듈마다 독립.
+	//
+	// 같은 repo의 여러 batch 모듈이 동일 main에 VERSION bump를 push하면 각 PR이 다른 모듈의 bump 커밋까지
+	// 포함하게 되어 cross-contamination 발생 (모듈 A merge 시 모듈 B VERSION도 bump됨).
+	// HeadBranch를 모듈마다 분리해 각 PR이 정확히 자기 bump 1건만 포함하도록 보장.
+	HeadBranch string
 
 	// 진행 결과
 	NewCommitSHA string
@@ -502,11 +510,12 @@ func runReleaseSteps(ctx context.Context, rc *ReleaseContext, statusFn ReleaseSt
 		commits []github.Commit
 		files   []github.ComparisonFile
 	)
+	// codex review 2차 P1 isolation: batch 모드(rc.HeadBranch != "")는 항상 main HEAD를 BaseSHA로 캡처.
+	// 같은 repo의 다른 batch 모듈이 main을 forward하기 전에 snapshot을 잡아 isolated head 브랜치 base로 사용.
+	// 단일 모드는 첫 릴리즈만 main HEAD 캡처 (기존 동작 보존).
 	if rc.IsFirstRelease() {
 		windowDays := int(firstReleaseLookback / (24 * time.Hour))
 		statusFn(1, fmt.Sprintf("첫 릴리즈 — 지난 %d일 main 커밋 수집 중...", windowDays))
-		// main HEAD를 UpdateFile 이전 시점으로 캡처. release 브랜치는 이 SHA에서 분기되어
-		// Step 3 이후 main이 1 커밋 앞서서 PR이 정상 1+ commit 상태가 된다.
 		mainRef, err := githubClient.GetRef(ctx, rc.Owner, rc.Repo, "heads/main")
 		if err != nil {
 			return "", fmt.Errorf("첫 릴리즈 — main HEAD 조회 실패: %w", err)
@@ -525,7 +534,6 @@ func runReleaseSteps(ctx context.Context, rc *ReleaseContext, statusFn ReleaseSt
 		commits = cmts
 	} else {
 		statusFn(1, "직전 tag ↔ main diff 수집 중...")
-		// 정상 케이스: PrevTagCommitSHA를 그대로 BaseSHA로.
 		rc.BaseSHA = rc.PrevTagCommitSHA
 		cmp, err := githubClient.CompareCommits(ctx, rc.Owner, rc.Repo, rc.PrevTag, "main")
 		if err != nil {
@@ -533,6 +541,18 @@ func runReleaseSteps(ctx context.Context, rc *ReleaseContext, statusFn ReleaseSt
 		}
 		commits = cmp.Commits
 		files = cmp.Files
+	}
+	// Batch 모드 isolation 추가 캡처 — 위에서 BaseSHA가 PrevTagCommitSHA로 세팅됐을 수 있는데,
+	// HeadBranch base는 main HEAD여야 함 (UpdateFile이 head 브랜치에 commit하면 다른 모듈 bump가 섞이지 않음).
+	// 이 경우 별도 batchHeadBaseSHA 변수에 main HEAD를 캡처해 head 브랜치 생성에만 사용.
+	var batchHeadBaseSHA string
+	if rc.HeadBranch != "" {
+		mainRef, err := githubClient.GetRef(ctx, rc.Owner, rc.Repo, "heads/main")
+		if err != nil {
+			return "", fmt.Errorf("batch — main HEAD 조회 실패 (head 브랜치 base용): %w", err)
+		}
+		batchHeadBaseSHA = mainRef.Object.SHA
+		log.Printf("[릴리즈/batch] head 브랜치 base SHA 캡처 module=%s sha=%s", rc.Module.Key, batchHeadBaseSHA)
 	}
 	rc.CommitCount = len(commits)
 	if rc.CommitCount == 0 {
@@ -571,13 +591,33 @@ func runReleaseSteps(ctx context.Context, rc *ReleaseContext, statusFn ReleaseSt
 
 	// Step 3: VERSION 파일 갱신
 	rc.LastStep = 3
-	statusFn(3, fmt.Sprintf("VERSION 파일 main 에 commit/push 중 (v%s → v%s)...", rc.PrevVersion, rc.NewVersion))
+	// codex review 2차 P1 isolation: batch 모드는 main 직접 commit 대신 모듈별 head 브랜치(rc.HeadBranch)에 commit.
+	// head 브랜치는 main HEAD snapshot(batchHeadBaseSHA)에서 분기 — 다른 batch 모듈의 bump가 섞이지 않음.
+	// 단일 모드는 rc.HeadBranch == "" → 기존 동작(main에 직접 commit) 유지.
+	commitBranch := "main"
+	if rc.HeadBranch != "" {
+		commitBranch = rc.HeadBranch
+		// head 브랜치 ensure — 없으면 main snapshot SHA에서 생성, 있으면 재사용 (idempotent).
+		if _, err := githubClient.GetRef(ctx, rc.Owner, rc.Repo, "heads/"+rc.HeadBranch); err != nil {
+			if !errors.Is(err, github.ErrNotFound) {
+				return "", fmt.Errorf("GetRef(batch head branch) 실패: %w", err)
+			}
+			if _, err := githubClient.CreateRef(ctx, rc.Owner, rc.Repo, "refs/heads/"+rc.HeadBranch, batchHeadBaseSHA); err != nil {
+				return "", fmt.Errorf("CreateRef(batch head branch) 실패: %w", err)
+			}
+			log.Printf("[릴리즈/batch] head 브랜치 생성 module=%s branch=%s base=%s",
+				rc.Module.Key, rc.HeadBranch, batchHeadBaseSHA)
+		}
+		// rc.FileSHA는 handleReleaseModule/setupReleaseContextForBatch가 main에서 GetFile해 가져온 값.
+		// batch head 브랜치는 방금 main HEAD snapshot에서 갈라졌으므로 같은 VERSION 파일 SHA — 그대로 if-match 가능.
+	}
+	statusFn(3, fmt.Sprintf("VERSION 파일 %s 에 commit/push 중 (v%s → v%s)...", commitBranch, rc.PrevVersion, rc.NewVersion))
 	upd, err := githubClient.UpdateFile(ctx, rc.Owner, rc.Repo, github.UpdateFileInput{
 		Path:    rc.Module.VersionPath,
 		Content: []byte(rc.NewVersion.String() + "\n"),
 		SHA:     rc.FileSHA,
 		Message: fmt.Sprintf("chore(%s): bump VERSION to %s", rc.Module.Key, rc.NewVersion),
-		Branch:  "main",
+		Branch:  commitBranch,
 	})
 	if err != nil {
 		return "", fmt.Errorf("UpdateFile 실패: %w", err)
@@ -615,10 +655,15 @@ func runReleaseSteps(ctx context.Context, rc *ReleaseContext, statusFn ReleaseSt
 
 	// Step 5: PR 생성 (또는 기존 open PR 본문 갱신 — 멱등 처리)
 	rc.LastStep = 5
+	// codex review 2차 P1 isolation: PR head는 batch 모드면 모듈별 head 브랜치, 그 외 main.
+	prHead := "main"
+	if rc.HeadBranch != "" {
+		prHead = rc.HeadBranch
+	}
 	prTitle := fmt.Sprintf("[deploy] %s-v%s", rc.Module.Key, rc.NewVersion)
-	statusFn(5, fmt.Sprintf("PR 생성/갱신 (base=%s ← head=main)...", rc.Module.ReleaseBranch))
+	statusFn(5, fmt.Sprintf("PR 생성/갱신 (base=%s ← head=%s)...", rc.Module.ReleaseBranch, prHead))
 	existing, err := githubClient.ListPullRequestsByHead(ctx, rc.Owner, rc.Repo,
-		rc.Owner+":main", rc.Module.ReleaseBranch, "open")
+		rc.Owner+":"+prHead, rc.Module.ReleaseBranch, "open")
 	if err != nil {
 		return "", fmt.Errorf("ListPullRequestsByHead 실패: %w", err)
 	}
@@ -636,7 +681,7 @@ func runReleaseSteps(ctx context.Context, rc *ReleaseContext, statusFn ReleaseSt
 		pr, err = githubClient.CreatePullRequest(ctx, rc.Owner, rc.Repo, github.CreatePullRequestInput{
 			Title: prTitle,
 			Body:  prBody,
-			Head:  "main",
+			Head:  prHead,
 			Base:  rc.Module.ReleaseBranch,
 		})
 		if err != nil {
@@ -808,14 +853,30 @@ func handleReleaseBackLine(s *discordgo.Session, i *discordgo.InteractionCreate,
 		releaseLineComponents())
 }
 
+// handleReleaseBackModule는 [← 다시 선택] 클릭 시 모듈 선택 prompt를 다시 띄운다.
+//
+// codex review 2차 P2 fix: 이전엔 LineBackend를 하드코딩해서 frontend 모듈 진입 후 [← 다시 선택]을
+// 누르면 backend 모듈 화면으로 잘못 돌아가는 회귀가 있었음. 현재 ReleaseCtx.Module.Line으로 분기.
+//
+// 모듈이 아직 선택 안 됐으면(Module.Key=="" — handleReleaseModule 호출 전에 [← 다시 선택]은 normally
+// 도달 불가) 라인 선택 화면으로 폴백.
 func handleReleaseBackModule(s *discordgo.Session, i *discordgo.InteractionCreate, sess *Session) {
 	if sess.ReleaseCtx == nil {
 		respondInteraction(s, i, "릴리즈 컨텍스트가 만료되었습니다. sticky의 [릴리즈 PR 만들기] button으로 다시 시작해주세요.")
 		return
 	}
-	modules := release.ModulesByLine(release.LineBackend)
+	if sess.ReleaseCtx.Module.Key == "" {
+		// 비정상 경로 — 모듈 선택 전엔 doone 안 됨. 안전하게 라인 선택으로 fallback.
+		logGuard("release", "back_module_no_module", "ReleaseCtx.Module 미설정 — 라인 화면으로 fallback",
+			lf("thread", sess.ThreadID))
+		respondInteractionWithComponents(s, i, "어떤 라인을 릴리즈할까요?", releaseLineComponents())
+		return
+	}
+	line := sess.ReleaseCtx.Module.Line
+	label := line.String()
+	modules := release.ModulesByLine(line)
 	respondInteractionWithComponents(s, i,
-		"백엔드 — 어느 모듈을 릴리즈할까요?",
+		fmt.Sprintf("%s — 어느 모듈을 릴리즈할까요?", label),
 		releaseModuleComponents(modules))
 }
 
@@ -1413,6 +1474,11 @@ func setupReleaseContextForBatch(ctx context.Context, module release.Module, bum
 	rc.Bump = bump
 	rc.NewVersion = newVer
 	rc.NewTag = newVer.Tag(module)
+
+	// codex review 2차 P1 isolation: 모듈마다 독립된 head 브랜치를 사용해 같은 repo의 다른 batch 모듈
+	// bump 커밋이 PR에 섞이지 않도록 한다. 브랜치명은 (모듈 키, 새 버전) 기준 deterministic — 같은 release를
+	// 두 번 시도해도 동일 브랜치 (idempotent — UpdateFile이 if-match SHA로 충돌 감지).
+	rc.HeadBranch = fmt.Sprintf("release-batch/%s-v%s", module.Key, newVer.String())
 	return rc, nil
 }
 
