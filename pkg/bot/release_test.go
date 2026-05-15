@@ -1,6 +1,8 @@
 package bot
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"chatbot-alpha-1/pkg/release"
@@ -21,5 +23,112 @@ func Test_batchReleaseMaxModules_invariant(t *testing.T) {
 			"  2. 일부 모듈을 release.Modules에서 제외\n"+
 			"  3. batchReleaseMaxModules 자체를 키우는 건 위 1번 재설계 후에만 안전",
 			got, batchReleaseMaxModules)
+	}
+}
+
+// =====================================================================
+// Race condition 검증 (codex 3차 리뷰 fix)
+//
+// 운영 환경에서 discordgo가 InteractionCreate를 goroutine마다 dispatch하므로
+// 같은 thread에서 여러 사용자가 동시에 button/SelectMenu 클릭 시 BatchReleaseContext와
+// ReleaseContext가 cross-goroutine read/write됨. 평범한 bool/map은 -race로 검출되며
+// map의 경우 Go runtime이 "fatal error: concurrent map writes"로 프로세스 panic.
+//
+// 본 테스트는 -race 플래그로 수행 시 fix가 빠지면 실패하도록 설계.
+// =====================================================================
+
+// Test_BatchReleaseContext_SetSelection_동시_쓰기는 panic-level race를 reproduce 검증한다.
+//
+// 시나리오: 두 사용자가 같은 thread의 batch UI에서 동시에 다른 모듈 SelectMenu 클릭.
+// 평범한 map[string]release.BumpType 직접 mutate라면 Go runtime이 "concurrent map writes"로
+// 프로세스를 panic 시킨다 (kubectl logs에 fatal error + pod crash). mu.Mutex 보호로 방지.
+func Test_BatchReleaseContext_SetSelection_동시_쓰기(t *testing.T) {
+	bc := &BatchReleaseContext{
+		Modules: release.Modules,
+	}
+	var wg sync.WaitGroup
+	const N = 50 // 과부하로 race window 확장
+	for i := 0; i < N; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); bc.SetSelection("product", release.BumpPatch) }()
+		go func() { defer wg.Done(); bc.SetSelection("admin", release.BumpMinor) }()
+	}
+	wg.Wait()
+
+	// 결과: 두 키 모두 set 되어야 함 (마지막 write가 winner이지만 panic 없이 완료가 핵심).
+	if got := bc.GetSelection("product"); got != release.BumpPatch {
+		t.Errorf("product selection = %v, want BumpPatch", got)
+	}
+	if got := bc.GetSelection("admin"); got != release.BumpMinor {
+		t.Errorf("admin selection = %v, want BumpMinor", got)
+	}
+}
+
+// Test_BatchReleaseContext_Selections_읽기_쓰기_동시는 -race로 mu 보호 검증.
+// SnapshotSelections (read) ↔ SetSelection (write) 동시 호출.
+func Test_BatchReleaseContext_Selections_읽기_쓰기_동시(t *testing.T) {
+	bc := &BatchReleaseContext{Modules: release.Modules}
+	bc.SetSelection("product", release.BumpPatch)
+
+	var wg sync.WaitGroup
+	const N = 100
+	for i := 0; i < N; i++ {
+		wg.Add(3)
+		go func() { defer wg.Done(); bc.SetSelection("admin", release.BumpMinor) }()
+		go func() { defer wg.Done(); _ = bc.SnapshotSelections() }()
+		go func() { defer wg.Done(); _ = bc.SelectedCount() }()
+	}
+	wg.Wait()
+	// panic 없이 완료되면 통과 (-race로 데이터 race 감지 안 되어야 함).
+}
+
+// Test_ReleaseContext_InProgress_동시는 atomic.Bool race 보호 검증.
+// runReleaseFlow goroutine의 Store(true/false) ↔ interaction handler의 Load() 동시.
+func Test_ReleaseContext_InProgress_동시(t *testing.T) {
+	rc := &ReleaseContext{}
+	var wg sync.WaitGroup
+	var loadCount atomic.Int64
+	const N = 200
+	for i := 0; i < N; i++ {
+		wg.Add(3)
+		go func() { defer wg.Done(); rc.InProgress.Store(true) }()
+		go func() { defer wg.Done(); rc.InProgress.Store(false) }()
+		go func() {
+			defer wg.Done()
+			if rc.InProgress.Load() {
+				loadCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	// 결과 값 자체는 비결정적 (마지막 store 따라). loadCount는 0 ~ N 사이.
+	// panic / -race 검출 없으면 통과.
+	if loadCount.Load() < 0 {
+		t.Errorf("loadCount 음수 — atomic.Int64 비정상")
+	}
+}
+
+// Test_BatchReleaseContext_InProgress_CompareAndSwap_단일_진입은
+// 동시 [모두 진행] click 중 정확히 1번만 진입 성공함을 검증.
+func Test_BatchReleaseContext_InProgress_CompareAndSwap_단일_진입(t *testing.T) {
+	bc := &BatchReleaseContext{Modules: release.Modules}
+	var wg sync.WaitGroup
+	var winnerCount atomic.Int64
+	const N = 100
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if bc.InProgress.CompareAndSwap(false, true) {
+				winnerCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := winnerCount.Load(); got != 1 {
+		t.Errorf("CompareAndSwap winner count = %d, want 1 (race 시에도 단일 진입 보장)", got)
+	}
+	if !bc.InProgress.Load() {
+		t.Error("CompareAndSwap 후 InProgress가 true가 아님")
 	}
 }
