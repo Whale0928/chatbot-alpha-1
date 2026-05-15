@@ -101,10 +101,10 @@ func Test_ReleaseContext_InProgress_동시(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	// 결과 값 자체는 비결정적 (마지막 store 따라). loadCount는 0 ~ N 사이.
-	// panic / -race 검출 없으면 통과.
-	if loadCount.Load() < 0 {
-		t.Errorf("loadCount 음수 — atomic.Int64 비정상")
+	// 본 테스트의 1차 목적은 -race 검출 — Store/Load가 atomic.Bool 보호로 데이터 race 없음을 검증.
+	// 부차적 invariant: loadCount는 0 ~ N (각 Load는 0 또는 1 추가). 값 자체는 비결정적이지만 한도는 명확.
+	if got := loadCount.Load(); got < 0 || got > int64(N) {
+		t.Errorf("loadCount = %d, want 0 <= count <= %d (각 goroutine이 0/1만 추가)", got, N)
 	}
 }
 

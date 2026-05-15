@@ -120,10 +120,14 @@ type ReleaseContext struct {
 	// 실패 시 renderReleaseProgress 에 -LastStep 으로 전달해 어디서 실패했는지 시각화.
 	LastStep int
 
-	// InProgress는 runReleaseFlow가 실행 중인지 표시 (codex review P2/P3 + 3차 race fix).
+	// InProgress는 runReleaseFlow가 실행 중인지 표시 (codex review P2/P3 + 3/4차 race fix).
 	// runReleaseFlow는 background goroutine, 가드 read는 interaction handler goroutine — cross-goroutine
 	// access이므로 atomic.Bool 사용 (평범한 bool은 -race 검출됨, 운영 중 가드 flaky 위험).
-	// lifecycle: runReleaseFlow Store(true) → defer Store(false). 가드는 Load()로 in-flight 판정.
+	// lifecycle (Copilot 4차 CAS pattern):
+	//   - handleReleaseConfirm가 CompareAndSwap(false, true)로 진입 commit (단일 진입 원자 보장).
+	//   - runReleaseFlow는 defer로 Store(false)만 수행 (시작 시 Store(true) X — caller가 commit).
+	//   - 5차 fix: handleReleaseConfirm의 progress 전송 early-return 경로에서도 Store(false) 명시.
+	// 가드 read는 Load() — handleReleaseLine("all") / customIDSubActionRelease가 in-flight 판정.
 	InProgress atomic.Bool
 
 	// Failed는 runReleaseFlow가 에러로 종료됐는지 표시 (codex review 4차 P2 fix).
@@ -1622,7 +1626,7 @@ func setupReleaseContextForBatch(ctx context.Context, module release.Module, bum
 //  3. WaitGroup로 N goroutine 병렬 발사 (각각 runOneBatchModule)
 //  4. 모든 goroutine done → batchProgress finish (마지막 edit)
 //  5. 합본 결과 메시지 send (성공/실패 + PR URL)
-//  6. BatchReleaseCtx.InProgress = false (cleanup)
+//  6. defer로 bc.InProgress.Store(false) (atomic.Bool — 3차 race fix)
 //  7. sendSticky 재발사 (A-8 일관성)
 func runBatchReleaseFlow(s *discordgo.Session, sess *Session, bc *BatchReleaseContext) {
 	startedAt := time.Now()
