@@ -22,6 +22,8 @@ import (
 //
 // 구조: 한 단락 요약 (decisions / actions / topics 압축) + 핵심 결정 + 핵심 액션 + 토픽 + 푸터.
 // 격식 있는 4분할 (decision_status) 보다 풀어 쓴 톤이지만 사실 자체는 동일.
+//
+// Deprecated: Stage 4 LLM (summarize.RenderFormat)으로 대체. fallback 용도로만 호출 가능 (LLM 장애 시).
 func RenderSummarizedFreeform(in SummarizedRenderInput) string {
 	if in.Content == nil {
 		return ""
@@ -78,7 +80,8 @@ func RenderSummarizedFreeform(in SummarizedRenderInput) string {
 // composeFreeformSummary는 SummarizedContent에서 1-2 문장 한 단락 요약을 합성한다 (pure).
 //
 // 출력 패턴:
-//   "결정 N건 / 액션 M건 / 미정 K건. 가장 활발한 토픽: <첫 토픽 제목>."
+//
+//	"결정 N건 / 액션 M건 / 미정 K건. 가장 활발한 토픽: <첫 토픽 제목>."
 //
 // 모든 카테고리가 비어 있으면 빈 문자열 반환 (호출자가 단락 자체를 생략).
 // LLM 추론 없이 카운팅 + 첫 항목 인용만 사용 — 결정성·비용 모두 0.

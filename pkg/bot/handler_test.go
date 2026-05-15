@@ -23,13 +23,14 @@ type sentMessage struct {
 }
 
 type fakeMessenger struct {
-	sent        []sentMessage
-	sentComplex []sentMessage
-	edited      []sentMessage // edited messages (ChannelID/Content + MsgID는 별도)
-	editedIDs   []string      // channelID:messageID 형식
-	deleted     []string      // deleted message IDs (channelID:messageID 형식)
-	nextMsgID   int           // 연속적인 mock 메시지 ID 할당
-	mu          sync.Mutex    // progress goroutine과 동시 접근 보호
+	sent            []sentMessage
+	sentComplex     []sentMessage
+	complexPayloads []*discordgo.MessageSend
+	edited          []sentMessage // edited messages (ChannelID/Content + MsgID는 별도)
+	editedIDs       []string      // channelID:messageID 형식
+	deleted         []string      // deleted message IDs (channelID:messageID 형식)
+	nextMsgID       int           // 연속적인 mock 메시지 ID 할당
+	mu              sync.Mutex    // progress goroutine과 동시 접근 보호
 }
 
 func (f *fakeMessenger) ChannelMessageSend(channelID, content string, _ ...discordgo.RequestOption) (*discordgo.Message, error) {
@@ -44,6 +45,7 @@ func (f *fakeMessenger) ChannelMessageSendComplex(channelID string, data *discor
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sentComplex = append(f.sentComplex, sentMessage{ChannelID: channelID, Content: data.Content})
+	f.complexPayloads = append(f.complexPayloads, data)
 	f.nextMsgID++
 	return &discordgo.Message{ID: fmt.Sprintf("mock-msg-%d", f.nextMsgID)}, nil
 }
@@ -95,6 +97,12 @@ type fakeSummarizer struct {
 	extractErr   error
 	extractCalls int
 	lastExtract  summarize.ContentExtractionInput
+
+	// Phase A — RenderFormat
+	renderFormatResp  string
+	renderFormatErr   error
+	renderFormatCalls int
+	lastRenderFormat  summarize.FormatRenderInput
 
 	// capture inputs
 	lastNotes     []llm.Note

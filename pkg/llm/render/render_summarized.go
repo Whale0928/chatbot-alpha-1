@@ -35,6 +35,8 @@ type SummarizedRenderInput struct {
 //
 // 섹션 순서: H1 → 결정사항 → 완료 → 진행 중 → 예정 → 이슈 → 미정 → 액션 → 푸터
 // 빈 섹션은 생략 (자리 채움 마크다운 안 만든다 — UX/검증 양쪽 이득).
+//
+// Deprecated: Stage 4 LLM (summarize.RenderFormat)으로 대체. fallback 용도로만 호출 가능 (LLM 장애 시).
 func RenderSummarizedDecisionStatus(in SummarizedRenderInput) string {
 	if in.Content == nil {
 		return ""
@@ -83,6 +85,8 @@ func RenderSummarizedDecisionStatus(in SummarizedRenderInput) string {
 //
 // 섹션: H1 → ## 토픽1 (Flow bullets + Insights) → ## 토픽2 → ... → 미정 → 푸터
 // Topics가 비어있으면 헤더만 출력 (사용자가 토글했는데 빈 결과 = LLM이 토픽 클러스터링 실패한 것을 보여주는 디버깅 단서).
+//
+// Deprecated: Stage 4 LLM (summarize.RenderFormat)으로 대체. fallback 용도로만 호출 가능 (LLM 장애 시).
 func RenderSummarizedDiscussion(in SummarizedRenderInput) string {
 	if in.Content == nil {
 		return ""
@@ -227,9 +231,10 @@ func isCrossRoleAction(a llm.SummaryAction) bool {
 // writeSummarizedFooter는 참석자 + 태그 풋터를 출력한다 (Date 헤더와 짝).
 //
 // 형식:
-//   ---
-//   참석자: alice, bob
-//   태그: #foo #bar
+//
+//	---
+//	참석자: alice, bob
+//	태그: #foo #bar
 func writeSummarizedFooter(b *strings.Builder, speakers []string, tags []string) {
 	if len(speakers) == 0 && len(tags) == 0 {
 		return

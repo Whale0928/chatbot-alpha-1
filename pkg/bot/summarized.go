@@ -167,10 +167,10 @@ func PersistFinalizeRun(ctx context.Context, summarizedID string, format db.Form
 // 흐름:
 //   1. 빈 corpus 체크 — 발화 없으면 안내 후 종료
 //   2. PrepareContentExtractionInput으로 corpus 분리
-//   3. summ.ExtractContent (LLM 1회)
+//   3. summ.ExtractContent (Stage 3 LLM)
 //   4. PersistSummarizedContent (DB best-effort)
-//   5. default 포맷(decision_status)으로 렌더 + 메시지 전송
-//      (chunk 3c에서 4 포맷 토글 button 첨부 추가 예정)
+//   5. default 포맷(decision_status)으로 summ.RenderFormat (Stage 4 LLM)
+//   6. embed 메시지 전송 + default 포맷 finalize_run 캐시 저장
 //
 // keepSession은 finalizeMeeting과 동일한 의미 — true면 세션 보존(에러), false면 정리.
 // =====================================================================
@@ -202,9 +202,6 @@ func FinalizeSummarized(
 		return true
 	}
 
-	// chunk 4 — progress 표시 시작 (LLM 호출 동안 ASCII 바 + 단계 + 경과 시간).
-	// 5단계: corpus 분리 / LLM 호출+응답 대기 / 파싱·validate / DB persist / 메시지 전송
-	// (LLM 호출과 응답 대기는 ticker 주기보다 짧은 간격으로 연속이라 단일 단계로 합침 — 사용자 가시성)
 	progress := StartProgress(ctx, msg, sess.ThreadID, "정리본 추출", 5)
 	defer progress.Finish()
 
@@ -225,7 +222,7 @@ func FinalizeSummarized(
 	log.Printf("[미팅/finalize_summarized] 시작 thread=%s human_notes=%d context_notes=%d speakers=%d",
 		sess.ThreadID, len(in.HumanNotes), len(in.ContextNotes), len(in.Speakers))
 
-	progress.SetStage(2, "LLM 호출 및 응답 대기")
+	progress.SetStage(2, "LLM 호출 — 1차 정리 (ExtractContent)")
 	content, err := summ.ExtractContent(ctx, in)
 	if err != nil {
 		log.Printf("[미팅/finalize_summarized] ERR ExtractContent thread=%s: %v", sess.ThreadID, err)
@@ -235,18 +232,25 @@ func FinalizeSummarized(
 		return true // 세션 보존 — 사용자가 재시도 가능
 	}
 
-	progress.SetStage(3, "응답 파싱·validate")
-
-	// DB persist (best-effort)
-	progress.SetStage(4, "DB 저장")
+	progress.SetStage(3, "응답 파싱 / DB 저장")
 	scID := PersistSummarizedContent(ctx, sess, content)
 
-	progress.SetStage(5, "메시지 전송")
-	// chunk 3c: default 포맷으로 렌더 + 4 포맷 토글 button row 첨부.
-	// 사용자가 클릭 시 메시지 edit으로 즉시 전환 — LLM 재호출 X.
 	defaultFormat := llm.FormatDecisionStatus
-	rendered := renderSummarizedByFormat(content, defaultFormat, in.Speakers, in.SpeakerRoles, now)
+	progress.SetStage(4, "LLM 호출 — 포맷 렌더 (RenderFormat)")
+	rendered, usedFallback := renderFormatWithPureFallback(ctx, summ, summarize.FormatRenderInput{
+		Content:      content,
+		Format:       defaultFormat,
+		Date:         now,
+		Speakers:     in.Speakers,
+		SpeakerRoles: in.SpeakerRoles,
+		Directive:    "",
+	}, "미팅/finalize_summarized", sess.ThreadID, scID)
+	if !usedFallback {
+		log.Printf("[미팅/finalize_summarized] llm_render_ok thread=%s format=%s sc=%s rendered_bytes=%d",
+			sess.ThreadID, defaultFormat, scID, len(rendered))
+	}
 
+	progress.SetStage(5, "메시지 전송")
 	// 정리본 메시지 전송 — embed로 보내 Discord 4096자 한도 활용 (plain content는 2000자 한도).
 	// 운영 사고(2026-05-15): plain content로 보내다 LLM 출력이 2000자 초과 시 HTTP 400 →
 	// "정리본을 추출하는 중..." stuck. embed.Description은 4096자라 대부분 케이스 커버.
@@ -270,11 +274,31 @@ func FinalizeSummarized(
 	return false
 }
 
-// renderSummarizedByFormat은 SummarizedContent를 지정 포맷으로 렌더하는 dispatch.
-// chunk 3c의 토글 핸들러도 같은 함수를 재사용하여 동일 콘텐츠 다른 포맷을 즉시 변환.
+func renderFormatWithPureFallback(
+	ctx context.Context,
+	summ MeetingSummarizer,
+	in summarize.FormatRenderInput,
+	scope string,
+	threadID string,
+	summarizedID string,
+) (string, bool) {
+	if summ == nil {
+		log.Printf("[%s] WARN LLM 실패 — pure render fallback thread=%s format=%s sc=%s err=summarizer nil",
+			scope, threadID, in.Format, summarizedID)
+		return renderSummarizedByFormat(in.Content, in.Format, in.Speakers, in.SpeakerRoles, in.Date), true
+	}
+	rendered, err := summ.RenderFormat(ctx, in)
+	if err != nil {
+		log.Printf("[%s] WARN LLM 실패 — pure render fallback thread=%s format=%s sc=%s err=%v",
+			scope, threadID, in.Format, summarizedID, err)
+		return renderSummarizedByFormat(in.Content, in.Format, in.Speakers, in.SpeakerRoles, in.Date), true
+	}
+	return rendered, false
+}
+
+// renderSummarizedByFormat은 SummarizedContent를 지정 포맷으로 pure render하는 dispatch.
 //
-// 이 함수는 pkg/llm/render의 4 RenderSummarized* 순수 함수를 thin wrapper로 호출 —
-// LLM 재호출 없음 (거시 디자인 결정 A).
+// Deprecated: Stage 4 LLM (summarize.RenderFormat)으로 대체. fallback 용도로만 호출 가능 (LLM 장애 시).
 func renderSummarizedByFormat(
 	content *llm.SummarizedContent,
 	format llm.NoteFormat,
@@ -366,7 +390,7 @@ func formatToDBKind(f llm.NoteFormat) db.FormatKind {
 //
 // 흐름:
 //  1. 새 포맷 추출 (customID에서)
-//  2. DB에서 sess의 latest SummarizedContent 조회 — LLM 재호출 X (거시 결정 A)
+//  2. DB에서 sess의 latest SummarizedContent 조회
 //  3. finalize_runs cache 조회
 //  4. cache miss면 SummarizedContent를 새 포맷으로 LLM 재렌더
 //  5. 메시지 edit + 토글 button row 갱신 (active 강조)
@@ -433,12 +457,6 @@ func HandleFormatToggle(
 	case errors.Is(err, sql.ErrNoRows):
 		log.Printf("[meeting/format_toggle] cache_miss thread=%s format=%s sc=%s — LLM call",
 			sess.ThreadID, format, scRow.ID)
-		if summarizer == nil {
-			log.Printf("[미팅/format_toggle] ERR summarizer nil thread=%s format=%s sc=%s",
-				sess.ThreadID, format, scRow.ID)
-			sendFollowup("포맷 렌더링을 실행할 수 없습니다. 봇 설정을 확인해주세요.")
-			return
-		}
 
 		var content llm.SummarizedContent
 		if err := json.Unmarshal(scRow.Content, &content); err != nil {
@@ -457,23 +475,23 @@ func HandleFormatToggle(
 		sess.NotesMu.Unlock()
 
 		start := time.Now()
-		rendered, err = summarizer.RenderFormat(ctx, summarize.FormatRenderInput{
+		var usedFallback bool
+		rendered, usedFallback = renderFormatWithPureFallback(ctx, summarizer, summarize.FormatRenderInput{
 			Content:      &content,
 			Format:       format,
 			Date:         scRow.ExtractedAt,
 			Speakers:     speakers,
 			SpeakerRoles: rolesCopy,
 			Directive:    "",
-		})
+		}, "meeting/format_toggle", sess.ThreadID, scRow.ID)
 		elapsed := time.Since(start)
-		if err != nil {
-			log.Printf("[meeting/format_toggle] ERR RenderFormat thread=%s format=%s sc=%s elapsed=%s err=%v",
-				sess.ThreadID, format, scRow.ID, elapsed, err)
-			sendFollowup("포맷 렌더링 중 오류가 발생했습니다. 다시 토글 button을 눌러주세요.")
-			return
+		if !usedFallback {
+			log.Printf("[meeting/format_toggle] llm_render_ok thread=%s format=%s sc=%s elapsed=%s rendered_bytes=%d",
+				sess.ThreadID, format, scRow.ID, elapsed, len(rendered))
+		} else {
+			log.Printf("[meeting/format_toggle] pure_render_fallback_ok thread=%s format=%s sc=%s elapsed=%s rendered_bytes=%d",
+				sess.ThreadID, format, scRow.ID, elapsed, len(rendered))
 		}
-		log.Printf("[meeting/format_toggle] llm_render_ok thread=%s format=%s sc=%s elapsed=%s rendered_bytes=%d",
-			sess.ThreadID, format, scRow.ID, elapsed, len(rendered))
 		PersistFinalizeRun(ctx, scRow.ID, formatKind, "", rendered)
 	default:
 		log.Printf("[미팅/format_toggle] ERR GetFinalizeRunByFormat thread=%s sc=%s format=%s: %v",

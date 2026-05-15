@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -60,18 +61,24 @@ func newBotTestDB(t *testing.T) *db.DB {
 	return d
 }
 
-func (f *fakeSummarizer) RenderFormat(_ context.Context, _ summarize.FormatRenderInput) (string, error) {
-	return "", nil
+func (f *fakeSummarizer) RenderFormat(_ context.Context, in summarize.FormatRenderInput) (string, error) {
+	f.renderFormatCalls++
+	f.lastRenderFormat = in
+	return f.renderFormatResp, f.renderFormatErr
 }
 
 type formatToggleSummarizer struct {
 	fakeSummarizer
 	renderFormatCalls int
 	outputs           map[llm.NoteFormat]string
+	errs              map[llm.NoteFormat]error
 }
 
 func (f *formatToggleSummarizer) RenderFormat(_ context.Context, in summarize.FormatRenderInput) (string, error) {
 	f.renderFormatCalls++
+	if err, ok := f.errs[in.Format]; ok {
+		return "", err
+	}
 	if out, ok := f.outputs[in.Format]; ok {
 		return out, nil
 	}
@@ -188,6 +195,131 @@ func TestPersistSummarizedContent_NoOpWhenDBSessionIDEmpty(t *testing.T) {
 	got := PersistSummarizedContent(t.Context(), sess, &llm.SummarizedContent{})
 	if got != "" {
 		t.Errorf("DBSessionID empty → want empty id, got %q", got)
+	}
+}
+
+func TestFinalizeSummarized_InitialSendUsesRenderFormatAndPersistsDefaultCache(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+
+	oldDBConn := dbConn
+	t.Cleanup(func() { dbConn = oldDBConn })
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_finalize",
+		ThreadID: "thread-finalize",
+		GuildID:  "guild-finalize",
+		OwnerID:  "owner-finalize",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	content := &llm.SummarizedContent{
+		Decisions: []llm.Decision{{Title: "초기 결정"}},
+		Actions: []llm.SummaryAction{{
+			What: "초기 액션", Origin: "alice",
+			OriginRoles: []string{"BACKEND"}, TargetRoles: []string{"BACKEND"},
+		}},
+		Topics: []llm.Topic{{Title: "초기 토픽", Flow: []string{"흐름"}}},
+	}
+	summ := &fakeSummarizer{
+		extractResp:      content,
+		renderFormatResp: "initial decision render from LLM",
+	}
+	msg := &fakeMessenger{}
+	sess := &Session{
+		ThreadID:      "thread-finalize",
+		DBSessionID:   "sess_finalize",
+		RolesSnapshot: map[string][]string{"u_alice": {"BACKEND"}},
+	}
+	sess.AddNoteWithMeta(Note{
+		Author:      "alice",
+		AuthorID:    "u_alice",
+		AuthorRoles: []string{"BACKEND"},
+		Content:     "초기 발화",
+		Source:      db.SourceHuman,
+	})
+	now := time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC)
+
+	keep := FinalizeSummarized(ctx, msg, summ, sess, now)
+
+	if keep {
+		t.Fatalf("keepSession = true, want false")
+	}
+	if summ.extractCalls != 1 {
+		t.Fatalf("ExtractContent calls = %d, want 1", summ.extractCalls)
+	}
+	if summ.renderFormatCalls != 1 {
+		t.Fatalf("RenderFormat calls = %d, want 1", summ.renderFormatCalls)
+	}
+	if summ.lastRenderFormat.Format != llm.FormatDecisionStatus {
+		t.Fatalf("RenderFormat format = %s, want %s", summ.lastRenderFormat.Format, llm.FormatDecisionStatus)
+	}
+	if summ.lastRenderFormat.Content != content {
+		t.Fatalf("RenderFormat content pointer mismatch")
+	}
+	if got := summ.lastRenderFormat.Speakers; !reflect.DeepEqual(got, []string{"alice"}) {
+		t.Fatalf("RenderFormat speakers = %v, want [alice]", got)
+	}
+	if got := summ.lastRenderFormat.SpeakerRoles["alice"]; !reflect.DeepEqual(got, []string{"BACKEND"}) {
+		t.Fatalf("RenderFormat speaker roles = %v, want [BACKEND]", got)
+	}
+	if len(msg.complexPayloads) != 1 {
+		t.Fatalf("complex sends = %d, want 1", len(msg.complexPayloads))
+	}
+	payload := msg.complexPayloads[0]
+	if len(payload.Embeds) != 1 || payload.Embeds[0].Description != "initial decision render from LLM" {
+		t.Fatalf("embed description = %#v, want LLM render", payload.Embeds)
+	}
+	if len(payload.Components) != 1 {
+		t.Fatalf("components = %d, want 1 row", len(payload.Components))
+	}
+
+	var count int
+	if err := d.QueryRowContext(ctx, "SELECT COUNT(*) FROM finalize_runs").Scan(&count); err != nil {
+		t.Fatalf("count finalize_runs: %v", err)
+	}
+	var format, directive, output string
+	if err := d.QueryRowContext(ctx,
+		"SELECT format, directive, output_md FROM finalize_runs",
+	).Scan(&format, &directive, &output); err != nil {
+		t.Fatalf("query finalize_runs: %v", err)
+	}
+	if count != 1 || format != string(db.FormatDecisionStatus) || directive != "" || output != "initial decision render from LLM" {
+		t.Fatalf("finalize_run = count:%d format:%q directive:%q output:%q", count, format, directive, output)
+	}
+}
+
+func TestFinalizeSummarized_RenderFormatFailureFallsBackToPureRender(t *testing.T) {
+	ctx := context.Background()
+	content := &llm.SummarizedContent{
+		Decisions: []llm.Decision{{Title: "fallback decision"}},
+	}
+	summ := &fakeSummarizer{
+		extractResp:     content,
+		renderFormatErr: errors.New("llm down"),
+	}
+	msg := &fakeMessenger{}
+	sess := &Session{ThreadID: "thread-fallback"}
+	sess.AddNoteWithMeta(Note{Author: "alice", Content: "fallback input", Source: db.SourceHuman})
+
+	keep := FinalizeSummarized(ctx, msg, summ, sess, time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC))
+
+	if keep {
+		t.Fatalf("keepSession = true, want false")
+	}
+	if summ.renderFormatCalls != 1 {
+		t.Fatalf("RenderFormat calls = %d, want 1", summ.renderFormatCalls)
+	}
+	if len(msg.complexPayloads) != 1 || len(msg.complexPayloads[0].Embeds) != 1 {
+		t.Fatalf("complex embed send missing: %#v", msg.complexPayloads)
+	}
+	got := msg.complexPayloads[0].Embeds[0].Description
+	if !strings.Contains(got, "# 2026-05-14") || !strings.Contains(got, "fallback decision") {
+		t.Fatalf("fallback render missing expected content:\n%s", got)
 	}
 }
 
@@ -334,6 +466,8 @@ func TestHandleFormatToggle_UsesFinalizeRunCache(t *testing.T) {
 		outputs: map[llm.NoteFormat]string{
 			llm.FormatDecisionStatus: "decision render from LLM",
 			llm.FormatDiscussion:     "discussion render from LLM",
+			llm.FormatRoleBased:      "role render from LLM",
+			llm.FormatFreeform:       "freeform render from LLM",
 		},
 	}
 	summarizer = summ
@@ -396,13 +530,110 @@ func TestHandleFormatToggle_UsesFinalizeRunCache(t *testing.T) {
 		}
 	}
 
-	toggle(customIDFormatToggleDecisionStatus, "decision render from LLM", 1, 1)
+	cases := []struct {
+		customID string
+		format   llm.NoteFormat
+		body     string
+	}{
+		{customIDFormatToggleDecisionStatus, llm.FormatDecisionStatus, "decision render from LLM"},
+		{customIDFormatToggleDiscussion, llm.FormatDiscussion, "discussion render from LLM"},
+		{customIDFormatToggleRoleBased, llm.FormatRoleBased, "role render from LLM"},
+		{customIDFormatToggleFreeform, llm.FormatFreeform, "freeform render from LLM"},
+	}
+	for idx, tc := range cases {
+		wantCalls := idx + 1
+		wantRuns := idx + 1
+		toggle(tc.customID, tc.body, wantCalls, wantRuns)
 
-	summ.outputs[llm.FormatDecisionStatus] = "decision rerender should not be used"
-	toggle(customIDFormatToggleDecisionStatus, "decision render from LLM", 1, 1)
+		summ.outputs[tc.format] = "rerender should not be used"
+		toggle(tc.customID, tc.body, wantCalls, wantRuns)
+	}
+}
 
-	toggle(customIDFormatToggleDiscussion, "discussion render from LLM", 2, 2)
+func TestHandleFormatToggle_RenderFormatFailureFallsBackAndCachesPureRender(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
 
-	summ.outputs[llm.FormatDecisionStatus] = "decision rerender should still not be used"
-	toggle(customIDFormatToggleDecisionStatus, "decision render from LLM", 2, 2)
+	oldDBConn := dbConn
+	oldSummarizer := summarizer
+	t.Cleanup(func() {
+		dbConn = oldDBConn
+		summarizer = oldSummarizer
+	})
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_toggle_fallback",
+		ThreadID: "thread-toggle-fallback",
+		GuildID:  "guild-toggle-fallback",
+		OwnerID:  "owner-toggle-fallback",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	content := &llm.SummarizedContent{
+		Decisions: []llm.Decision{{Title: "fallback cached decision"}},
+	}
+	raw, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("Marshal summarized content: %v", err)
+	}
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID:          "sc_toggle_fallback",
+		SessionID:   "sess_toggle_fallback",
+		Content:     raw,
+		ExtractedAt: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent: %v", err)
+	}
+
+	summ := &formatToggleSummarizer{
+		errs: map[llm.NoteFormat]error{
+			llm.FormatDecisionStatus: errors.New("llm down"),
+		},
+	}
+	summarizer = summ
+
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID: "app-toggle-fallback",
+			Token: "token-toggle-fallback",
+		},
+	}
+	sess := &Session{
+		ThreadID:    "thread-toggle-fallback",
+		DBSessionID: "sess_toggle_fallback",
+	}
+	sess.AddNoteWithMeta(Note{Author: "alice", Content: "toggle fallback", Source: db.SourceHuman})
+
+	HandleFormatToggle(ctx, discordSession, interaction, sess, customIDFormatToggleDecisionStatus)
+
+	if summ.renderFormatCalls != 1 {
+		t.Fatalf("RenderFormat calls = %d, want 1", summ.renderFormatCalls)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
+	}
+	if !strings.Contains(rt.calls[0].body, "# 2026-05-14") || !strings.Contains(rt.calls[0].body, "fallback cached decision") {
+		t.Fatalf("edit body missing fallback render:\n%s", rt.calls[0].body)
+	}
+	var output string
+	if err := d.QueryRowContext(ctx,
+		"SELECT output_md FROM finalize_runs WHERE summarized_content_id = ? AND format = ?",
+		"sc_toggle_fallback", string(db.FormatDecisionStatus),
+	).Scan(&output); err != nil {
+		t.Fatalf("query fallback finalize_run: %v", err)
+	}
+	if !strings.Contains(output, "fallback cached decision") {
+		t.Fatalf("cached output missing fallback content:\n%s", output)
+	}
 }
