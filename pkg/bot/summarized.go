@@ -499,8 +499,17 @@ func HandleFormatToggle(
 		log.Printf("[meeting/format_toggle] cache_miss thread=%s format=%s sc=%s — LLM call",
 			sess.ThreadID, format, scRow.ID)
 
+		// Codex review (PR #13) P2: parse 먼저 — placeholder edit 전에 검증.
+		// 옛 순서로는 parse 실패 시 메시지가 "다시 만드는 중"으로 영구 stuck됐다.
+		var content llm.SummarizedContent
+		if err := json.Unmarshal(scRow.Content, &content); err != nil {
+			log.Printf("[미팅/format_toggle] ERR unmarshal sc=%s: %v", scRow.ID, err)
+			sendFollowup("정리본 파싱에 실패했습니다.")
+			return
+		}
+
 		// Option 2 UX — cache miss는 LLM 호출 3-10초 걸려서 사용자가 "버튼 눌렀는데 반응 없음"으로 체감.
-		// LLM 호출 전에 즉시 placeholder embed로 edit해서 시각 피드백 제공.
+		// parse 성공 후 placeholder embed로 edit해서 시각 피드백 제공.
 		// active 토글 button은 새 포맷으로 미리 강조 → 어떤 포맷 로딩 중인지 명확.
 		placeholderEmbed := &discordgo.MessageEmbed{
 			Description: fmt.Sprintf("**%s** 포맷으로 정리본을 다시 만드는 중입니다…\n\n잠시만 기다려주세요. (보통 3~10초 소요)",
@@ -516,13 +525,6 @@ func HandleFormatToggle(
 			// placeholder 실패는 치명 X — 로그만 남기고 LLM 호출 진행. 최종 edit에서 다시 시도.
 			log.Printf("[미팅/format_toggle] WARN placeholder edit 실패 (LLM 호출은 계속) thread=%s: %v",
 				sess.ThreadID, err)
-		}
-
-		var content llm.SummarizedContent
-		if err := json.Unmarshal(scRow.Content, &content); err != nil {
-			log.Printf("[미팅/format_toggle] ERR unmarshal sc=%s: %v", scRow.ID, err)
-			sendFollowup("정리본 파싱에 실패했습니다.")
-			return
 		}
 
 		// 렌더 입력 — speakers/roles는 in-memory 세션 또는 DB에서. Phase 2에선 in-memory 우선.
