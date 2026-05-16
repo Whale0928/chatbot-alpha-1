@@ -777,3 +777,78 @@ func TestHandleFormatToggle_RenderFormatFailureFallsBackWithoutCachingPureRender
 		t.Fatalf("fallback finalize_runs count = %d, want 0", count)
 	}
 }
+
+// Codex review PR #13 P2: parse 실패 시 placeholder edit가 메시지를 변경하면 안 됨.
+// 옛 순서로는 placeholder edit이 먼저 실행돼 채널 메시지가 "다시 만드는 중" 상태로 영구 stuck됐다.
+// parse를 placeholder edit 앞으로 옮긴 후 회귀 가드.
+func TestHandleFormatToggle_ParseFailure_NoPlaceholderEdit(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+
+	oldDBConn := dbConn
+	oldSummarizer := summarizer
+	t.Cleanup(func() {
+		dbConn = oldDBConn
+		summarizer = oldSummarizer
+	})
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_parse_fail",
+		ThreadID: "thread-parse-fail",
+		GuildID:  "guild-parse-fail",
+		OwnerID:  "owner-parse-fail",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	// malformed JSON content (legacy / corrupt row 시뮬레이션)
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID:          "sc_malformed",
+		SessionID:   "sess_parse_fail",
+		Content:     []byte(`{"this is not valid": true, "decisions": <broken>`),
+		ExtractedAt: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent: %v", err)
+	}
+
+	// summarizer는 호출되면 안 됨 (parse 실패로 더 일찍 return).
+	summarizer = &formatToggleSummarizer{outputs: map[llm.NoteFormat]string{}}
+
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID: "app-parse-fail",
+			Token: "token-parse-fail",
+		},
+	}
+	sess := &Session{
+		ThreadID:    "thread-parse-fail",
+		DBSessionID: "sess_parse_fail",
+	}
+
+	HandleFormatToggle(ctx, discordSession, interaction, sess, customIDFormatToggleDiscussion)
+
+	// 핵심 가드: placeholder edit 발생 X — 메시지 원본 유지.
+	for idx, c := range rt.calls {
+		if strings.Contains(c.body, "다시 만드는 중") {
+			t.Fatalf("call[%d] contains placeholder '다시 만드는 중' — parse 실패 시 메시지 stuck 회귀:\n%s",
+				idx, c.body)
+		}
+	}
+	// followup만 (ephemeral 에러 안내) — InteractionResponseEdit 없음.
+	// FollowupMessageCreate는 POST /webhooks, InteractionResponseEdit은 PATCH /webhooks/.../messages/@original.
+	for _, c := range rt.calls {
+		if c.method == http.MethodPatch {
+			t.Fatalf("PATCH (message edit) 발생 — parse 실패 시 메시지 안 건드려야 함:\n%s", c.body)
+		}
+	}
+}
