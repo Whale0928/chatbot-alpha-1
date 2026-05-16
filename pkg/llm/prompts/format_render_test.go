@@ -148,13 +148,20 @@ func TestSummarizedContent_STRICT분리(t *testing.T) {
 }
 
 func TestSummarizedContent_봇author_라벨가이드(t *testing.T) {
-	// author에 [weekly]/[release]/[agent] 라벨 없는 항목 처리 가이드.
+	// NoteSource → author 라벨 강제 매핑이 SINGLE SOURCE OF TRUTH.
 	mustContain(t, "summarized author label", SummarizedContent, []string{
-		`author에 source 라벨을 박는다`,
+		`NoteSource 기반으로 author 라벨을 강제 매핑`,
 		`"[weekly]"`,
 		`"[release]"`,
 		`"[agent]"`,
-		`라벨이 없는 author로 들어온 항목은 무조건 external_refs`,
+		`SINGLE SOURCE OF TRUTH`,
+		`content 휴리스틱 사용 금지`,
+	})
+	// 옛 휴리스틱 (content 기반 자동 분류) 잔존 금지.
+	mustNotContain(t, "summarized no heuristic override", SummarizedContent, []string{
+		`or clearly labeled GitHub weekly analysis`,
+		`or clearly labeled release PR creation result`,
+		`or AI question/answer output`,
 	})
 }
 

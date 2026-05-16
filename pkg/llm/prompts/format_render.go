@@ -43,7 +43,10 @@ const formatRenderCommon = `You rerender an already-extracted SummarizedContent 
        discussion 포맷에서도 highlight가 1건 이상 있으면 "이번 주에 완료한 작업" 섹션을 새로 추가하여 노출
        (done 본 필드가 0이어도 highlight 있으면 섹션 등장).
      - role_based: highlights를 repo/module 키워드로 role 매핑 후 그 role 그룹의
-       "이번 주에 마무리한 작업" sub-section에 흡수. 매핑 불가 항목만 공통 "회의에서 함께 참고한 자료" fallback.
+       "이번 주에 마무리한 작업" sub-section에 흡수.
+       매핑 불가 항목은 highlights → 공통 "이번 주에 완료한 작업 (공통)" 섹션,
+       메타는 공통 "회의에서 함께 참고한 자료" 섹션으로 분리 (role_based "CRITICAL" 표 참조).
+       두 섹션에 중복 출력 금지.
 
    role 매핑 키워드 (role_based 포맷에서만 사용):
      - "*api-server*", "*-server*", "*backend*", "*-be*", "*server*" 포함 → BACKEND

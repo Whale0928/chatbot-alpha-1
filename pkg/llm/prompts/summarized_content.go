@@ -98,28 +98,31 @@ actions     { what, origin, origin_roles, target_roles, target_user, deadline }
 # Bot/reference fields — extraction guide (CONTEXT_NOTES → 4 fields)
 
 CONTEXT_NOTES entries arrive as "[C#] {author}: {content}".
-호출자 코드가 author에 source 라벨을 박는다:
-  - "[weekly]"  → weekly_reports
-  - "[release]" → release_results
-  - "[agent]"   → agent_responses
-  - 그 외 (일반 username)는 외부 paste → external_refs
+호출자 코드(PrepareContentExtractionInput)가 NoteSource 기반으로 author 라벨을 강제 매핑:
+  - SourceWeeklyDump    → author "[weekly]"
+  - SourceReleaseResult → author "[release]"
+  - SourceAgentOutput   → author "[agent]"
+  - SourceExternalPaste → author는 원본 username 유지 (사람이 붙여넣었으므로 의미 보존)
 
-라벨이 없는 author로 들어온 항목은 무조건 external_refs로 처리. 임의로 다른 봇 필드에 추측 분류 금지.
+author 라벨이 분류의 SINGLE SOURCE OF TRUTH (authoritative).
+content가 weekly/release/AI 답변처럼 보여도 author 라벨이 없으면 external_refs로 분류해라 — 라벨 override 금지.
+이유: ExternalPaste된 텍스트가 GitHub weekly 분석을 복붙한 것일 수도, 다른 회의록일 수도 있다.
+사람이 의도적으로 paste한 것은 도구가 직접 출력한 것과 다르므로 external_refs가 정확.
 
-weekly_reports  ← entries with author "[weekly]" or clearly labeled GitHub weekly analysis.
+weekly_reports  ← entries with author "[weekly]" (자동 매핑). content 휴리스틱 사용 금지.
   repo:        e.g. "bottle-note/bottle-note-api-server" or just repo name.
   period_days: 분석 윈도우 일수 (없으면 0).
   commit_count: 분석된 commit 개수 (없으면 0).
   highlights:  cleaned 3-5 short bullets. Strip raw markdown headers and verbose sentences.
                Korean. Each bullet ≤ 80 chars. Keep commit SHAs/PR numbers if mentioned.
 
-release_results ← entries with author "[release]" or clearly labeled release PR creation result.
+release_results ← entries with author "[release]" (자동 매핑). content 휴리스틱 사용 금지.
   module:      모듈 키 (product/admin/frontend/dashboard 등).
   prev_version/new_version/bump_type: 명시되면 채움, 모르면 빈 문자열.
   pr_number/pr_url: 명시되면 채움, 모르면 0/"".
   highlights:  cleaned 3-5 short bullets. Do NOT dump PR body verbatim.
 
-agent_responses ← entries with author "[agent]" or AI question/answer output.
+agent_responses ← entries with author "[agent]" (자동 매핑). content 휴리스틱 사용 금지.
   question:    user's question (or concise summary if too long).
   highlights:  AI answer core 3-5 bullets.
 
