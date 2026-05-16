@@ -97,6 +97,7 @@ func RenderSummarizedRoleBased(in SummarizedRenderInput) string {
 	}
 
 	writeMDBulletSection(&b, "미정 질문", c.OpenQuestions)
+	writeToolReferenceSections(&b, c)
 	writeSummarizedFooter(&b, in.Speakers, c.Tags)
 	return b.String()
 }

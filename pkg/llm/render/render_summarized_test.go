@@ -29,19 +29,19 @@ func sample5_14Content() *llm.SummarizedContent {
 		Actions: []llm.SummaryAction{
 			// 자기 발의 (BE→BE)
 			{
-				What: "큐레이션 order spec 확장 / 관리자 order 제어 구현",
+				What:   "큐레이션 order spec 확장 / 관리자 order 제어 구현",
 				Origin: "deadwhale", OriginRoles: []string{"BACKEND"}, TargetRoles: []string{"BACKEND"},
 				Deadline: "2026-05-21",
 			},
 			// cross-role (PM → FE)
 			{
-				What: "GitHub 이슈 206/207/208 체크",
+				What:   "GitHub 이슈 206/207/208 체크",
 				Origin: "kimjuye", OriginRoles: []string{"PM"}, TargetRoles: []string{"FRONTEND"},
 				Deadline: "2026-05-21",
 			},
 			// PM 자기 발의 (target 모호)
 			{
-				What: "위스키 캐스크정보 업데이트 완료",
+				What:   "위스키 캐스크정보 업데이트 완료",
 				Origin: "kimjuye", OriginRoles: []string{"PM"},
 				Deadline: "2026-05-21",
 			},
@@ -175,6 +175,56 @@ func TestRenderSummarizedDiscussion_EmptyTopicsShowsHint(t *testing.T) {
 
 	if !strings.Contains(got, "토픽이 추출되지 않았습니다") {
 		t.Errorf("Topics 빈 케이스에 디버깅 단서 누락:\n%s", got)
+	}
+}
+
+func TestRenderSummarizedPureFallback_신규도구필드를_모든포맷에_출력한다(t *testing.T) {
+	content := &llm.SummarizedContent{
+		WeeklyReports: []llm.WeeklyReportSummary{{
+			Repo: "checkout/api", PeriodDays: 7, CommitCount: 12,
+			Highlights: []string{"결제 안정화"},
+		}},
+		ReleaseResults: []llm.ReleaseResultSummary{{
+			Module: "product", PrevVersion: "1.1.5", NewVersion: "1.1.6", BumpType: "patch", PRNumber: 43,
+			Highlights: []string{"latency guard"},
+		}},
+		AgentResponses: []llm.AgentResponseSummary{{
+			Question:   "Redis failover 원인",
+			Highlights: []string{"primary 전환 중 timeout 증가"},
+		}},
+		ExternalRefs: []llm.ExternalRefSummary{{
+			Title:      "vendor latency 보고서",
+			Highlights: []string{"p95 latency 420ms"},
+		}},
+	}
+	input := sampleInput(content)
+
+	cases := []struct {
+		name string
+		got  string
+	}{
+		{"decision_status", RenderSummarizedDecisionStatus(input)},
+		{"discussion", RenderSummarizedDiscussion(input)},
+		{"role_based", RenderSummarizedRoleBased(input)},
+		{"freeform", RenderSummarizedFreeform(input)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, want := range []string{
+				"checkout/api",
+				"결제 안정화",
+				"product: 1.1.5 → 1.1.6",
+				"latency guard",
+				"Redis failover 원인",
+				"primary 전환 중 timeout 증가",
+				"vendor latency 보고서",
+				"p95 latency 420ms",
+			} {
+				if !strings.Contains(tc.got, want) {
+					t.Fatalf("missing %q in %s render:\n%s", want, tc.name, tc.got)
+				}
+			}
+		})
 	}
 }
 

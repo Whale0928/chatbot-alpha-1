@@ -266,8 +266,10 @@ func FinalizeSummarized(
 		return true
 	}
 
-	// FinalizeRun persist (default 포맷)
-	PersistFinalizeRun(ctx, scID, db.FormatDecisionStatus, "", rendered)
+	// FinalizeRun persist (default 포맷). Fallback은 LLM 재시도 기회를 보존하기 위해 캐시하지 않는다.
+	if !usedFallback {
+		PersistFinalizeRun(ctx, scID, db.FormatDecisionStatus, "", rendered)
+	}
 
 	log.Printf("[미팅/finalize_summarized] 완료 thread=%s sc=%s actions=%d topics=%d default_format=%s",
 		sess.ThreadID, scID, len(content.Actions), len(content.Topics), defaultFormat)
@@ -492,7 +494,9 @@ func HandleFormatToggle(
 			log.Printf("[meeting/format_toggle] pure_render_fallback_ok thread=%s format=%s sc=%s elapsed=%s rendered_bytes=%d",
 				sess.ThreadID, format, scRow.ID, elapsed, len(rendered))
 		}
-		PersistFinalizeRun(ctx, scRow.ID, formatKind, "", rendered)
+		if !usedFallback {
+			PersistFinalizeRun(ctx, scRow.ID, formatKind, "", rendered)
+		}
 	default:
 		log.Printf("[미팅/format_toggle] ERR GetFinalizeRunByFormat thread=%s sc=%s format=%s: %v",
 			sess.ThreadID, scRow.ID, format, err)

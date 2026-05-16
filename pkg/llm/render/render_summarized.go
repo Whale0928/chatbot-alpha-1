@@ -63,6 +63,7 @@ func RenderSummarizedDecisionStatus(in SummarizedRenderInput) string {
 	writeMDBulletSection(&b, "예정", c.Planned)
 	writeMDBulletSection(&b, "이슈/블로커", c.Blockers)
 	writeMDBulletSection(&b, "미정 질문", c.OpenQuestions)
+	writeToolReferenceSections(&b, c)
 
 	// 액션 — SummaryAction을 markdown checkbox로
 	if len(c.Actions) > 0 {
@@ -118,6 +119,7 @@ func RenderSummarizedDiscussion(in SummarizedRenderInput) string {
 	}
 
 	writeMDBulletSection(&b, "미정 질문", c.OpenQuestions)
+	writeToolReferenceSections(&b, c)
 	writeSummarizedFooter(&b, in.Speakers, c.Tags)
 	return b.String()
 }
@@ -137,6 +139,112 @@ func writeMDBulletSection(b *strings.Builder, title string, items []string) {
 		fmt.Fprintf(b, "- %s\n", it)
 	}
 	b.WriteString("\n")
+}
+
+func writeToolReferenceSections(b *strings.Builder, c *llm.SummarizedContent) {
+	if c == nil || (len(c.WeeklyReports) == 0 && len(c.ReleaseResults) == 0 &&
+		len(c.AgentResponses) == 0 && len(c.ExternalRefs) == 0) {
+		return
+	}
+	b.WriteString("## 도구/참고 결과\n\n")
+	writeWeeklyReports(b, c.WeeklyReports)
+	writeReleaseResults(b, c.ReleaseResults)
+	writeAgentResponses(b, c.AgentResponses)
+	writeExternalRefs(b, c.ExternalRefs)
+}
+
+func writeWeeklyReports(b *strings.Builder, reports []llm.WeeklyReportSummary) {
+	if len(reports) == 0 {
+		return
+	}
+	b.WriteString("### 주간 분석\n\n")
+	for _, r := range reports {
+		meta := []string{}
+		if r.PeriodDays > 0 {
+			meta = append(meta, fmt.Sprintf("최근 %d일", r.PeriodDays))
+		}
+		if r.CommitCount > 0 {
+			meta = append(meta, fmt.Sprintf("commits %d", r.CommitCount))
+		}
+		label := r.Repo
+		if label == "" {
+			label = "repo 미상"
+		}
+		if len(meta) > 0 {
+			label += " (" + strings.Join(meta, ", ") + ")"
+		}
+		writeToolReferenceLine(b, label, r.Highlights)
+	}
+	b.WriteString("\n")
+}
+
+func writeReleaseResults(b *strings.Builder, releases []llm.ReleaseResultSummary) {
+	if len(releases) == 0 {
+		return
+	}
+	b.WriteString("### 릴리즈 결과\n\n")
+	for _, r := range releases {
+		label := r.Module
+		if label == "" {
+			label = "module 미상"
+		}
+		if r.PrevVersion != "" || r.NewVersion != "" {
+			label += fmt.Sprintf(": %s → %s", r.PrevVersion, r.NewVersion)
+		}
+		meta := []string{}
+		if r.BumpType != "" {
+			meta = append(meta, r.BumpType)
+		}
+		if r.PRNumber > 0 {
+			meta = append(meta, fmt.Sprintf("PR #%d", r.PRNumber))
+		}
+		if r.PRURL != "" {
+			meta = append(meta, r.PRURL)
+		}
+		if len(meta) > 0 {
+			label += " (" + strings.Join(meta, ", ") + ")"
+		}
+		writeToolReferenceLine(b, label, r.Highlights)
+	}
+	b.WriteString("\n")
+}
+
+func writeAgentResponses(b *strings.Builder, responses []llm.AgentResponseSummary) {
+	if len(responses) == 0 {
+		return
+	}
+	b.WriteString("### AI 응답\n\n")
+	for _, r := range responses {
+		label := r.Question
+		if label == "" {
+			label = "질문 미상"
+		}
+		writeToolReferenceLine(b, label, r.Highlights)
+	}
+	b.WriteString("\n")
+}
+
+func writeExternalRefs(b *strings.Builder, refs []llm.ExternalRefSummary) {
+	if len(refs) == 0 {
+		return
+	}
+	b.WriteString("### 외부 참고\n\n")
+	for _, r := range refs {
+		label := r.Title
+		if label == "" {
+			label = "제목 미상"
+		}
+		writeToolReferenceLine(b, label, r.Highlights)
+	}
+	b.WriteString("\n")
+}
+
+func writeToolReferenceLine(b *strings.Builder, label string, highlights []string) {
+	if len(highlights) == 0 {
+		fmt.Fprintf(b, "- %s\n", label)
+		return
+	}
+	fmt.Fprintf(b, "- %s: %s\n", label, strings.Join(highlights, "; "))
 }
 
 // formatActionLine은 SummaryAction 1건을 한 줄 markdown checkbox로 변환한다.

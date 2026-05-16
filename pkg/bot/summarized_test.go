@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -317,6 +318,53 @@ func TestFinalizeSummarized_RenderFormatFailureFallsBackToPureRender(t *testing.
 	}
 }
 
+func TestFinalizeSummarized_RenderFormatFailureDoesNotPersistFallbackRun(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+
+	oldDBConn := dbConn
+	t.Cleanup(func() { dbConn = oldDBConn })
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_finalize_fallback_no_cache",
+		ThreadID: "thread-finalize-fallback-no-cache",
+		GuildID:  "guild-finalize-fallback-no-cache",
+		OwnerID:  "owner-finalize-fallback-no-cache",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	content := &llm.SummarizedContent{
+		Decisions: []llm.Decision{{Title: "fallback decision no cache"}},
+	}
+	summ := &fakeSummarizer{
+		extractResp:     content,
+		renderFormatErr: errors.New("llm down"),
+	}
+	msg := &fakeMessenger{}
+	sess := &Session{
+		ThreadID:    "thread-finalize-fallback-no-cache",
+		DBSessionID: "sess_finalize_fallback_no_cache",
+	}
+	sess.AddNoteWithMeta(Note{Author: "alice", Content: "fallback input", Source: db.SourceHuman})
+
+	keep := FinalizeSummarized(ctx, msg, summ, sess, time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC))
+
+	if keep {
+		t.Fatalf("keepSession = true, want false")
+	}
+	var count int
+	if err := d.QueryRowContext(ctx, "SELECT COUNT(*) FROM finalize_runs").Scan(&count); err != nil {
+		t.Fatalf("count finalize_runs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("finalize_runs count = %d, want 0 for fallback render", count)
+	}
+}
+
 // =====================================================================
 // chunk 3c — 토글 button + 포맷 변환 테스트
 // =====================================================================
@@ -409,6 +457,27 @@ func TestRenderSummarizedByFormat_AllFourFormats(t *testing.T) {
 				t.Errorf("format %s missing date header:\n%s", f, got)
 			}
 		})
+	}
+}
+
+func TestFormatToggleDiscordTimeoutIs90Seconds(t *testing.T) {
+	raw, err := os.ReadFile("discord.go")
+	if err != nil {
+		t.Fatalf("ReadFile discord.go: %v", err)
+	}
+	src := string(raw)
+	start := strings.Index(src, "case customIDFormatToggleDecisionStatus,")
+	if start < 0 {
+		t.Fatal("format toggle case not found")
+	}
+	rest := src[start:]
+	end := strings.Index(rest, "case customIDFinalizeSummarized:")
+	if end < 0 {
+		t.Fatal("finalize summarized case not found after format toggle case")
+	}
+	block := rest[:end]
+	if !strings.Contains(block, "context.WithTimeout(context.Background(), 90*time.Second)") {
+		t.Fatalf("format toggle timeout must be 90s, block:\n%s", block)
 	}
 }
 
@@ -544,7 +613,7 @@ func TestHandleFormatToggle_UsesFinalizeRunCache(t *testing.T) {
 	}
 }
 
-func TestHandleFormatToggle_RenderFormatFailureFallsBackAndCachesPureRender(t *testing.T) {
+func TestHandleFormatToggle_RenderFormatFailureFallsBackWithoutCachingPureRender(t *testing.T) {
 	ctx := context.Background()
 	d := newBotTestDB(t)
 
@@ -620,14 +689,14 @@ func TestHandleFormatToggle_RenderFormatFailureFallsBackAndCachesPureRender(t *t
 	if !strings.Contains(rt.calls[0].body, "# 2026-05-14") || !strings.Contains(rt.calls[0].body, "fallback cached decision") {
 		t.Fatalf("edit body missing fallback render:\n%s", rt.calls[0].body)
 	}
-	var output string
+	var count int
 	if err := d.QueryRowContext(ctx,
-		"SELECT output_md FROM finalize_runs WHERE summarized_content_id = ? AND format = ?",
+		"SELECT COUNT(*) FROM finalize_runs WHERE summarized_content_id = ? AND format = ?",
 		"sc_toggle_fallback", string(db.FormatDecisionStatus),
-	).Scan(&output); err != nil {
-		t.Fatalf("query fallback finalize_run: %v", err)
+	).Scan(&count); err != nil {
+		t.Fatalf("count fallback finalize_run: %v", err)
 	}
-	if !strings.Contains(output, "fallback cached decision") {
-		t.Fatalf("cached output missing fallback content:\n%s", output)
+	if count != 0 {
+		t.Fatalf("fallback finalize_runs count = %d, want 0", count)
 	}
 }

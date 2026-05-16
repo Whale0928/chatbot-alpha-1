@@ -379,7 +379,7 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			log.Printf("[미팅/format_toggle] ERR ack 실패: %v", err)
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		HandleFormatToggle(ctx, s, i, sess, data.CustomID)
 
@@ -761,4 +761,3 @@ func labelForFormat(f llm.NoteFormat) string {
 // respondInteractionWithStatus 폐기 — D1 정책 (UX 재설계 2026-05).
 // "mode_status" 라우팅과 home menu의 [상태 조회] button이 사라져서 진입점 없음.
 // 향후 sticky에 별도 [상태 조회] button을 추가하려면 이 함수를 부활시킬 수 있음.
-

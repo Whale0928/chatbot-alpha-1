@@ -214,7 +214,7 @@ func validateFormatRenderMarkdown(markdown string, in FormatRenderInput) error {
 	}
 
 	allowed := allowedAttributionNames(in)
-	attribution := regexp.MustCompile("(?m)^\\s*-\\s+`?@?([A-Za-z0-9_.-]+)`?\\s*:")
+	attribution := regexp.MustCompile(`(?m)^\s*-\s+@([A-Za-z0-9_.-]+)\s*:`)
 	for _, match := range attribution.FindAllStringSubmatch(markdown, -1) {
 		if len(match) < 2 {
 			continue

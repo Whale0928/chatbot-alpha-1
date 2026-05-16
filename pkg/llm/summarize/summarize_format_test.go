@@ -199,7 +199,7 @@ func TestRenderFormat_BulletDepth1단을_검증한다(t *testing.T) {
 }
 
 func TestRenderFormat_Origin에_없는_author_attribution을_거부한다(t *testing.T) {
-	markdown := "## 📋 액션 아이템\n- `bob`: API 안정화"
+	markdown := "## 📋 액션 아이템\n- @bob: API 안정화"
 	var requests []renderFormatRequest
 	c := newRenderFormatStubClient(t, mustMarkdownJSON(t, markdown), http.StatusOK, &requests)
 
@@ -218,6 +218,29 @@ func TestRenderFormat_Origin에_없는_author_attribution을_거부한다(t *tes
 	}
 	if !strings.Contains(err.Error(), "unknown attribution") {
 		t.Fatalf("expected unknown attribution error, got: %v", err)
+	}
+}
+
+func TestRenderFormat_AtPrefix없는_일반Bullet은_attribution으로_보지않는다(t *testing.T) {
+	markdown := "## 릴리즈\n- product: v1.1.6\n- backend: 큰 변경"
+	var requests []renderFormatRequest
+	c := newRenderFormatStubClient(t, mustMarkdownJSON(t, markdown), http.StatusOK, &requests)
+
+	got, err := RenderFormat(context.Background(), c, FormatRenderInput{
+		Content: &llm.SummarizedContent{
+			ReleaseResults: []llm.ReleaseResultSummary{
+				{Module: "product", NewVersion: "1.1.6", Highlights: []string{"backend 큰 변경"}},
+			},
+		},
+		Format:   llm.FormatDecisionStatus,
+		Date:     time.Date(2026, 5, 14, 0, 0, 0, 0, time.UTC),
+		Speakers: []string{"alice"},
+	})
+	if err != nil {
+		t.Fatalf("RenderFormat returned error for non-attribution bullet: %v", err)
+	}
+	if got != markdown {
+		t.Fatalf("markdown mismatch\nwant:\n%s\n\ngot:\n%s", markdown, got)
 	}
 }
 
