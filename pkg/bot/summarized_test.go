@@ -419,18 +419,31 @@ func TestFormatToggleComponents_ActiveHighlighted(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ActionsRow, got %T", comps[0])
 	}
-	if len(row.Components) != 4 {
-		t.Errorf("expected 4 toggle buttons, got %d", len(row.Components))
+	// 토글 4 + 복사 1 = 5 (Discord ActionsRow 최대 5 button)
+	if len(row.Components) != 5 {
+		t.Errorf("expected 5 buttons (4 toggle + 1 copy), got %d", len(row.Components))
 	}
-	// 활성(role_based)은 SuccessButton, 나머지는 SecondaryButton
+	// 활성(role_based)은 SuccessButton, 나머지 토글은 SecondaryButton, 복사는 PrimaryButton.
 	for _, c := range row.Components {
 		btn := c.(discordgo.Button)
-		if btn.CustomID == customIDFormatToggleRoleBased {
+		switch btn.CustomID {
+		case customIDFormatToggleRoleBased:
 			if btn.Style != discordgo.SuccessButton {
 				t.Errorf("active(role_based) style = %v, want SuccessButton", btn.Style)
 			}
-		} else if btn.Style != discordgo.SecondaryButton {
-			t.Errorf("inactive %s style = %v, want SecondaryButton", btn.CustomID, btn.Style)
+		case customIDFormatToggleDecisionStatus, customIDFormatToggleDiscussion, customIDFormatToggleFreeform:
+			if btn.Style != discordgo.SecondaryButton {
+				t.Errorf("inactive %s style = %v, want SecondaryButton", btn.CustomID, btn.Style)
+			}
+		case customIDFormatCopy:
+			if btn.Style != discordgo.PrimaryButton {
+				t.Errorf("copy button style = %v, want PrimaryButton", btn.Style)
+			}
+			if btn.Label != "복사" {
+				t.Errorf("copy button label = %q, want %q", btn.Label, "복사")
+			}
+		default:
+			t.Errorf("unexpected button customID = %q", btn.CustomID)
 		}
 	}
 }
