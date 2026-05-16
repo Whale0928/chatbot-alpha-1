@@ -208,9 +208,16 @@ func normalizeSpeakerRoles(src map[string][]string) map[string][]string {
 }
 
 func validateFormatRenderMarkdown(markdown string, in FormatRenderInput) error {
-	deepBullet := regexp.MustCompile(`(?m)^\s{4,}-`)
+	// v3.2 정책: 최대 깊이 3 (root + 2 nested). 4뎁스부터 거부.
+	// markdown 표준 2-space indent: 1뎁스 0, 2뎁스 2, 3뎁스 4, 4뎁스 6 spaces → 6+ spaces 거부.
+	deepBullet := regexp.MustCompile(`(?m)^\s{6,}-`)
 	if deepBullet.MatchString(markdown) {
-		return fmt.Errorf("llm: format render bullet depth exceeded one nested level")
+		return fmt.Errorf("llm: format render bullet depth exceeded two nested levels")
+	}
+
+	// v3.2 정책: 빈 섹션 "(없음)" 플레이스홀더 금지. 빈 필드는 섹션 헤더째 제거해야 함.
+	if strings.Contains(markdown, "(없음)") {
+		return fmt.Errorf("llm: format render output contains forbidden empty placeholder '(없음)'")
 	}
 
 	allowed := allowedAttributionNames(in)
