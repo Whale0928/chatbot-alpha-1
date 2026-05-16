@@ -168,6 +168,50 @@ func TestPrepareContentExtractionInput_EmptyNotes(t *testing.T) {
 	}
 }
 
+// Codex 3차 P2: NoteSource → author 라벨 강제 매핑 회귀 가드.
+// AppendResult가 [tool] 같은 임의 author로 박아도 LLM payload에는 [weekly]/[release]/[agent]가 박혀야 함.
+func TestPrepareContentExtractionInput_NoteSource_Author라벨_강제매핑(t *testing.T) {
+	notes := []Note{
+		{Author: "[tool]", Content: "주간 dump", Source: db.SourceWeeklyDump},
+		{Author: "anything", Content: "릴리즈 PR", Source: db.SourceReleaseResult},
+		{Author: "x", Content: "AI 답변", Source: db.SourceAgentOutput},
+		{Author: "alice", Content: "외부 paste 본문", Source: db.SourceExternalPaste},
+	}
+	in := PrepareContentExtractionInput(notes, nil, time.Now())
+
+	if len(in.ContextNotes) != 4 {
+		t.Fatalf("ContextNotes count = %d, want 4", len(in.ContextNotes))
+	}
+	wantAuthors := []string{"[weekly]", "[release]", "[agent]", "alice"}
+	for i, w := range wantAuthors {
+		if in.ContextNotes[i].Author != w {
+			t.Errorf("ContextNotes[%d].Author = %q, want %q (Source=%s)",
+				i, in.ContextNotes[i].Author, w, notes[i].Source)
+		}
+	}
+}
+
+func TestLabelForContextSource(t *testing.T) {
+	cases := []struct {
+		src        db.NoteSource
+		origAuthor string
+		want       string
+	}{
+		{db.SourceWeeklyDump, "[tool]", "[weekly]"},
+		{db.SourceReleaseResult, "anything", "[release]"},
+		{db.SourceAgentOutput, "bot", "[agent]"},
+		{db.SourceExternalPaste, "alice", "alice"},
+		{db.SourceExternalPaste, "", ""},
+	}
+	for _, c := range cases {
+		got := labelForContextSource(c.src, c.origAuthor)
+		if got != c.want {
+			t.Errorf("labelForContextSource(%s, %q) = %q, want %q",
+				c.src, c.origAuthor, got, c.want)
+		}
+	}
+}
+
 func TestPersistSummarizedContent_NoOpWhenDBUnavailable(t *testing.T) {
 	// dbConn nil인 상태(테스트 default)에선 빈 문자열 반환 + panic 없음.
 	sess := &Session{ThreadID: "t1", DBSessionID: "sess_x"}

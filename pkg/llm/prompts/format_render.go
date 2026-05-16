@@ -241,8 +241,10 @@ D) agent_responses / external_refs: role 그룹에 배치 안 함 — 항상 공
 CRITICAL (정책 통일):
   - 매핑 가능한 weekly/release: highlights는 해당 role 그룹의 "이번 주에 마무리한 작업"에 흡수,
     메타는 해당 role 그룹의 "참고 자료" sub-section에 1줄.
-  - 매핑 불가능한 weekly/release: highlights와 메타 모두 공통 "회의에서 함께 참고한 자료"로.
+  - 매핑 불가능한 weekly/release: highlights는 공통 "이번 주에 완료한 작업 (공통)"으로 (위 표 참조),
+    메타는 공통 "회의에서 함께 참고한 자료"로. 두 섹션에 분리. 중복 출력 금지.
   - agent_responses / external_refs: 항상 공통 "회의에서 함께 참고한 자료" (role 그룹 안 절대 X).
+    external_refs는 highlights도 sub-bullet으로 함께 출력 (rule 3 메타 line 형식).
   - 봇 결과 항목 자체에 attribution(담당자)은 부여하지 않음.
 
 빈 그룹 / 빈 sub-section / 빈 공통 섹션은 헤더째 제거. "(없음)" 절대 금지.

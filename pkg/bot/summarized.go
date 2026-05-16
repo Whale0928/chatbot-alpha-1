@@ -32,6 +32,21 @@ import (
 //   4. 후속 토글에서 PersistFinalizeRun으로 렌더 결과 캐시
 // =====================================================================
 
+// labelForContextSource는 NoteSource를 Stage 3 prompt가 기대하는 author 라벨로 매핑.
+// ExternalPaste는 사람 username을 유지 (외부 paste는 author 정보가 의미 있음).
+func labelForContextSource(src db.NoteSource, origAuthor string) string {
+	switch src {
+	case db.SourceWeeklyDump:
+		return "[weekly]"
+	case db.SourceReleaseResult:
+		return "[release]"
+	case db.SourceAgentOutput:
+		return "[agent]"
+	default:
+		return origAuthor
+	}
+}
+
 // PrepareContentExtractionInput는 세션의 in-memory Notes를 ContentExtractionInput으로 변환한다 (pure).
 //
 // 거시 디자인 결정 6 (Source 라벨 환각 방어) 핵심:
@@ -68,6 +83,10 @@ func PrepareContentExtractionInput(
 				speakerRoles[n.Author] = r
 			}
 		case n.Source.IsInCorpus():
+			// NoteSource → author prefix 강제 매핑 (Stage 3 prompt가 라벨 기반 분류).
+			// 호출자가 어떤 author로 박았든 LLM payload는 결정적.
+			// ExternalPaste만 원본 author 유지 (사람이 붙여넣은 것이라 username 의미 있음).
+			ln.Author = labelForContextSource(n.Source, n.Author)
 			contextNotes = append(contextNotes, ln)
 		}
 	}
