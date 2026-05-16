@@ -108,18 +108,26 @@ func Freeform(
 }
 
 // callMeetingFormat은 4 포맷 공통 chat.completions 호출 헬퍼.
+// model/reasoning은 label에 따라 분기 — "weekly"는 fastRenderModel (벤치 결과 3.26× 빠름, 핵심 보존).
+// 나머지 (legacy 4 포맷 finalize)는 meetingModel 유지.
 func callMeetingFormat(
 	ctx context.Context,
 	c *llm.Client,
 	label, systemPrompt, userMsg, schemaName string,
 	schema map[string]any,
 ) (string, error) {
-	log.Printf("[llm/openai] %s.new model=%s prompt_bytes=%d", label, meetingModel, len(userMsg))
+	model := meetingModel
+	reasoning := meetingReasoning
+	if label == "weekly" {
+		model = fastRenderModel
+		reasoning = fastRenderReasoning
+	}
+	log.Printf("[llm/openai] %s.new model=%s prompt_bytes=%d", label, model, len(userMsg))
 	log.Printf("[llm/openai] %s prompt_preview=%q", label, previewForLog(userMsg, 300))
 
 	resp, err := c.API().Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Model:           meetingModel,
-		ReasoningEffort: meetingReasoning,
+		Model:           model,
+		ReasoningEffort: reasoning,
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage(systemPrompt),
 			openai.UserMessage(userMsg),

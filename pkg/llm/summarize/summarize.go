@@ -30,7 +30,7 @@ var (
 	freeformSchema       = llm.GenerateSchema[llm.FreeformResponse]()
 )
 
-// meetingModel은 미팅 요약에 사용하는 OpenAI 모델.
+// meetingModel은 정리본 추출(Stage 3) 및 legacy 4 포맷 finalize에 사용하는 OpenAI 모델.
 // gpt-5.5는 GPT-5.5 정식 모델 ID (snapshot: gpt-5.5-2026-04-23).
 //
 // chat-latest alias 시도 이력: "gpt-5.5-chat-latest"는 2026-05-09 시점 API에서
@@ -41,12 +41,32 @@ var (
 //
 // openai-go v3.35.0 시점에는 GPT-5.5 전용 SDK 상수가 아직 없어 문자열 캐스팅으로 지정한다.
 // 후속 SDK가 ChatModelGPT5_5를 추가하면 그 상수로 치환할 것.
+//
+// === 모델 분기 (bench-render / bench-extract / bench-weekly 실측 기반, 2026-05-16) ===
+// Stage 3 (ExtractContent): gpt-5.5 + medium 유지. mini는 환각 방어 깨짐 (CONTEXT → HUMAN bleed).
+// Stage 4 (RenderFormat) + Weekly: 아래 fastRenderModel 사용 (2.5-4.4× 빠름, 품질 동등).
 const meetingModel openai.ChatModel = "gpt-5.5"
 
 // meetingReasoning은 reasoning effort. GPT-5.5의 권장 default인 medium으로 둬서
 // 환각 감소 효과(GPT-5.5가 GPT-5.3 대비 -52.5%)를 충분히 얻는다.
 // 비용/지연이 문제가 되면 low로 낮출 수 있고, 복잡한 운영 분석에서는 high도 고려.
 var meetingReasoning = openai.ReasoningEffortMedium
+
+// fastRenderModel은 Stage 4 RenderFormat / Weekly Report 등 변환 위주 호출에 사용.
+// 환각 위험이 낮은 변환 작업 — 입력 SummarizedContent JSON 또는 git log dump → markdown.
+//
+// 벤치 결과 (cmd/bench-render, cmd/bench-weekly, 2026-05-16 실측):
+//   - Stage 4 (4 포맷 합산): 5.5+medium 37.15s → 5.4-mini+low 19.19s (2.58× 빠름).
+//     role_based 케이스에서 5.5+medium 출력 token 2000자 초과 ERR — mini는 모두 정상.
+//   - Weekly Report: 5.5+medium 15.49s → 5.4-mini+low 4.75s (3.26× 빠름). 핵심 보존.
+//   - 비용: $5/$30 → $0.75/$4.50 (6.7× 저렴).
+//
+// 주의: Stage 3 ExtractContent에는 적용 금지 — 환각 방어가 핵심이고 mini는 bleed 위반.
+const fastRenderModel openai.ChatModel = "gpt-5.4-mini"
+
+// fastRenderReasoning은 fastRenderModel의 reasoning effort.
+// low로 충분 — 변환 작업이라 깊은 추론 불필요. mini의 low는 환각/누락 위험 작음 (벤치 확인).
+var fastRenderReasoning = openai.ReasoningEffortLow
 
 // Meeting은 수집된 메모와 발화자 목록을 받아 LLM을 호출하고
 // 구조화된 llm.FinalNoteResponse를 반환한다 (legacy v1.4 포맷).

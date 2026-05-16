@@ -15,11 +15,13 @@ import (
 )
 
 type renderFormatRequest struct {
+	Model    string `json:"model"`
 	Messages []struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"messages"`
-	MaxCompletionTokens int `json:"max_completion_tokens"`
+	MaxCompletionTokens int    `json:"max_completion_tokens"`
+	ReasoningEffort     string `json:"reasoning_effort"`
 	ResponseFormat      struct {
 		Type       string `json:"type"`
 		JSONSchema struct {
@@ -144,8 +146,15 @@ func TestRenderFormat_포맷별_MockLLM응답을_markdown으로_반환한다(t *
 				t.Fatalf("requests = %d, want 1", len(requests))
 			}
 			req := requests[0]
-			if req.MaxCompletionTokens != 1500 {
-				t.Fatalf("max_completion_tokens = %d, want 1500", req.MaxCompletionTokens)
+			if req.MaxCompletionTokens != 2500 {
+				t.Fatalf("max_completion_tokens = %d, want 2500", req.MaxCompletionTokens)
+			}
+			// Stage 4는 fastRenderModel (gpt-5.4-mini + low) 사용. 회귀 가드.
+			if req.Model != "gpt-5.4-mini" {
+				t.Errorf("model = %q, want gpt-5.4-mini (fastRenderModel)", req.Model)
+			}
+			if req.ReasoningEffort != "low" {
+				t.Errorf("reasoning_effort = %q, want low", req.ReasoningEffort)
 			}
 			if req.ResponseFormat.JSONSchema.Name != "meeting_format_render" {
 				t.Fatalf("schema name = %q, want meeting_format_render", req.ResponseFormat.JSONSchema.Name)
