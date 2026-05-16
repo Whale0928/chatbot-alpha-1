@@ -17,7 +17,9 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
-const formatRenderMaxCompletionTokens int64 = 1500
+// formatRenderMaxCompletionTokens — Stage 4 render max output token.
+// 1500 → 2500 상향 (벤치 결과 role_based 5.5+medium은 2000 token까지 사용. mini는 평균 800 → 안전 마진 확보).
+const formatRenderMaxCompletionTokens int64 = 2500
 
 var formatRenderSchema = llm.GenerateSchema[formatRenderResponse]()
 
@@ -80,12 +82,14 @@ func RenderFormat(ctx context.Context, c *llm.Client, in FormatRenderInput) (str
 	}
 
 	label := "render_format_" + in.Format.String()
-	log.Printf("[llm/openai] %s.new model=%s prompt_bytes=%d", label, meetingModel, len(userMsg))
+	log.Printf("[llm/openai] %s.new model=%s prompt_bytes=%d", label, fastRenderModel, len(userMsg))
 	log.Printf("[llm/openai] %s prompt_preview=%q", label, previewForLog(userMsg, 300))
 
+	// Stage 4 변환 작업 — fastRenderModel (gpt-5.4-mini + low) 사용.
+	// Stage 3 ExtractContent와 분리 (그쪽은 환각 방어 위해 gpt-5.5 + medium 유지).
 	resp, err := c.API().Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Model:               meetingModel,
-		ReasoningEffort:     meetingReasoning,
+		Model:               fastRenderModel,
+		ReasoningEffort:     fastRenderReasoning,
 		MaxCompletionTokens: openai.Int(formatRenderMaxCompletionTokens),
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage(systemPrompt),
