@@ -1,129 +1,144 @@
 package prompts
 
-// SummarizedContent는 Phase 2 — "정리본 1회 추출" 프롬프트.
+// SummarizedContent는 Stage 3 — "정리본 1회 추출" 프롬프트 (전면 재작성 v3, 2026-05-16).
 //
-// 4 포맷의 모든 사실(decisions, done, in_progress, planned, blockers, topics, actions, ...)을
-// 한 번의 LLM 호출로 추출한다. 후속 토글에서는 LLM 재호출 없이 순수 함수 렌더링.
+// 재작성 사유 (운영 사고):
+//   - 봇 weekly/release/agent 출력이 human-only 필드(done/in_progress/planned/blockers/topics)에 새서
+//     "🚀 릴리즈 작업 완료"에 weekly 사실이 박히는 환각급 출력. release sub-action 안 했는데도.
+//   - 핵심 원인: 옛 규칙 "If a fact appears only in CONTEXT_NOTES, you may put it in
+//     done/in_progress/planned/blockers or topics" 가 CONTEXT_NOTES→human 필드 bleeding 허용.
 //
-// 핵심 차별점 (기존 4 포맷별 prompt와의 차이):
-//   - cross-role 액션 인식 — Origin role과 Target role을 분리 (kimjuye(PM) → FE 요청 케이스)
-//   - 발화자 role snapshot 활용 — input에 SpeakerRoles 매핑 제공, LLM은 Origin/Target 라벨링
-//   - Source 라벨 가이드 — 도구 출력/외부 paste author는 attribution에서 제외 (호출자 게이트)
-//   - Topics는 Discussion 포맷용으로 별도 채움 (다른 필드와 중복 OK — 같은 사실 다른 view)
+// 새 정책: STRICT 1:1 매핑 + bleeding 0 허용.
+//   - HUMAN_NOTES (Source=Human 발화)   → human 필드 10개만
+//   - CONTEXT_NOTES (봇/도구/외부 paste) → 봇 결과 필드 4개만
+//   - 두 그룹 사이 사실 이동/중복 절대 금지
+//
+// 후속 Stage 4 (RenderFormat)도 같은 STRICT 매핑 — 빈 필드는 섹션 자체 제거 ((없음) 도배 X).
 const SummarizedContent = `You are a meeting note STRUCTURER. You extract ALL facts from a Korean Discord
 meeting transcript ONCE into a single structured payload. Downstream renderers
-will transform this payload into 4 different markdown formats WITHOUT re-calling
-the LLM.
+will transform this payload into 4 different markdown formats.
 
 # Output shape (single JSON, all fields required — empty arrays OK)
 
-decisions     → Decision[] {title, context[]}   — same as v1.4 decision-centered rule
-done          → string[]                        — completed facts ("완료", "배포됨")
-in_progress   → string[]                        — ongoing ("진행 중", "체크 중")
-planned       → string[]                        — future ("예정", "할 것")
-blockers      → string[]                        — blocked/risks ("문제", "막힘")
-topics        → Topic[] {title, flow[], insights[]}  — discussion threads, time-clustered
-actions       → SummaryAction[] {what, origin, origin_roles[], target_roles[], target_user, deadline}
-weekly_reports → WeeklyReportSummary[] {repo, period_days, commit_count, highlights[]}
-release_results → ReleaseResultSummary[] {module, prev_version, new_version, bump_type, pr_number, pr_url, highlights[]}
-agent_responses → AgentResponseSummary[] {question, highlights[]}
-external_refs → ExternalRefSummary[] {title, highlights[]}
-shared        → string[]                        — common items not tied to a single role
-open_questions→ string[]                        — undecided questions, "확인 필요" suffix
-tags          → string[]                        — single-token keywords, no spaces
+HUMAN fields (filled ONLY from HUMAN_NOTES):
+  decisions      → Decision[] {title, context[]}                — meeting decisions
+  done           → string[]                                      — completed facts spoken by humans
+  in_progress    → string[]                                      — ongoing items spoken by humans
+  planned        → string[]                                      — future plans spoken by humans
+  blockers       → string[]                                      — blockers/risks raised by humans
+  topics         → Topic[] {title, flow[], insights[]}           — discussion threads (human conversation)
+  actions        → SummaryAction[] {what, origin, origin_roles[], target_roles[], target_user, deadline}
+  shared         → string[]                                      — common items shared between roles
+  open_questions → string[]                                      — undecided questions (humans flagged "확인 필요")
+  tags           → string[]                                      — single-token keywords mentioned by humans
 
-# Decision shape (CRITICAL — anti-restatement rule)
+BOT/REFERENCE fields (filled ONLY from CONTEXT_NOTES):
+  weekly_reports  → WeeklyReportSummary[] {repo, period_days, commit_count, highlights[]}
+  release_results → ReleaseResultSummary[] {module, prev_version, new_version, bump_type, pr_number, pr_url, highlights[]}
+  agent_responses → AgentResponseSummary[] {question, highlights[]}
+  external_refs   → ExternalRefSummary[] {title, highlights[]}
 
-Each decision: { "title": "...", "context": ["...", "..."] }
-- title: the decision itself, ONE sentence, verbatim Korean technical terms.
-- context: 0-3 child items adding NEW info. Empty array IS GOOD.
+# STRICT FIELD SEPARATION (HARD RULE — anti-hallucination v3)
 
-For EACH context item, run this self-check:
-  Q1: "Could a reader who already read the title learn ANY new fact?"
-  Q2: "Does this child use a noun, number, or qualifier the title doesn't have?"
-If both NO, DROP the child.
+Inputs come in two named buckets in the user message:
+  - HUMAN_NOTES: actual speaker utterances (Source=Human).
+  - CONTEXT_NOTES: bot/tool outputs (weekly/release/agent) or external pastes.
 
-# Topics (Discussion format)
+Each input bucket maps to EXACTLY one output field set. NEVER cross. NEVER duplicate.
 
-Cluster the conversation by subject. Each topic = one subject thread.
-- title: noun phrase, one line.
-- flow: 2-5 natural Korean sentences capturing how the discussion progressed.
-- insights: 0-3 derived viewpoints/learnings/agreed directions. Suggestion tone, not declarative.
+ALLOWED:
+  HUMAN_NOTES   → decisions, actions, topics, done, in_progress, planned, blockers,
+                  shared, open_questions, tags  (10 fields)
+  CONTEXT_NOTES → weekly_reports, release_results, agent_responses, external_refs  (4 fields)
 
-You will populate Topics IN ADDITION to decisions/done/.../planned. Same fact MAY appear
-in both shapes — that is the point. The 4 renderers consume different subsets.
+FORBIDDEN (these will be rejected as hallucination):
+  - Putting a fact from CONTEXT_NOTES into ANY of the 10 human fields.
+    Example: weekly report saying "버전 1.1.4 bump 완료" → DO NOT add it to done[].
+  - Duplicating a fact between buckets (e.g. same item in both weekly_reports and done).
+  - Reframing a bot output as a human commitment (e.g. weekly's "푸시 기능 제거됨" →
+    actions[] "푸시 기능 제거" with some origin guess).
 
-# Actions (CRITICAL — cross-role recognition)
+Consequence of the rule:
+  - If HUMAN_NOTES is empty, ALL 10 human fields MUST be empty arrays.
+    The renderer will then show only the reference section ("참고 자료") with bot results.
+  - If CONTEXT_NOTES is empty, all 4 bot fields MUST be empty.
 
-Each action = a confirmed task with an owner OR a deadline.
-Fields:
-- what: the task, one Korean sentence. REQUIRED.
-- origin: speaker's Discord username. MUST be in input Speakers list (strict).
-- origin_roles: that speaker's roles, copied verbatim from input SpeakerRoles[origin].
-- target_roles: the role group(s) responsible for execution.
-   * For self-initiated actions (e.g. BE speaker says "BE will implement X"), copy OriginRoles.
-   * For cross-role requests (e.g. PM speaker says "프론트 체크 요청"), use the TARGET role
-     (here ["FRONTEND"]). Detect by Korean keywords:
-       - 프론트, 프론트엔드, FE, frontend → FRONTEND
-       - 백엔드, BE, 서버, backend       → BACKEND
-       - 기획, PM, planning              → PM
-       - 디자인, design, designer        → DESIGN
-     If both PM and DESIGN keywords appear in the same request, output both: ["PM","DESIGN"].
-     If a Discord guild role list provided in SpeakerRoles uses different labels than these,
-     prefer those labels verbatim (e.g. SpeakerRoles shows "디자이너" → use "디자이너").
-   * Empty array if the target is genuinely ambiguous.
-- target_user: a specific person's username if explicitly named (e.g. "현기님께 전달")
-   AND that person is in input Speakers. Otherwise empty.
-- deadline: YYYY-MM-DD if explicit, else Korean phrase like "차주 미팅까지", else "".
+# Human fields — extraction guide
 
-# Attribution rule (HALLUCINATION DEFENSE)
+decisions   { "title": "...", "context": ["..."] }
+  title: the decision itself, ONE sentence in Korean, verbatim technical terms.
+  context: 0-3 child items. Self-check before adding each child:
+    Q1: "Could a reader who already read the title learn any NEW fact?"
+    Q2: "Does this child use a noun, number, or qualifier the title doesn't have?"
+  If both answers are NO, DROP the child. Empty context is FINE.
 
-You will be given two role-tagged note groups in the user message:
-  - HUMAN_NOTES: actual speaker utterances. ONLY these are valid as action.origin.
-  - CONTEXT_NOTES: tool outputs (weekly_dump/release_result/agent_output) or external pastes.
-    Use these as background CONTEXT only. NEVER set action.origin to a CONTEXT_NOTES author.
+topics      { "title": "noun phrase", "flow": ["...", "..."], "insights": ["..."] }
+  Cluster human conversation by subject. One topic per subject thread.
+  flow: 2-5 Korean sentences capturing how the discussion progressed.
+  insights: 0-3 derived viewpoints (suggestion tone, not declarative).
 
-If a fact appears only in CONTEXT_NOTES, you may put it in done/in_progress/planned/blockers
-or topics, but NOT in actions. Actions are commitments made by speakers.
+actions     { what, origin, origin_roles, target_roles, target_user, deadline }
+  what: the task in one Korean sentence. REQUIRED.
+  origin: speaker's Discord username. MUST be in input Speakers list (strict).
+  origin_roles: that speaker's roles, copied verbatim from input SpeakerRoles[origin].
+  target_roles: who is responsible to execute.
+    - Self-initiated (e.g. BE speaker says "BE에서 할게요") → copy origin_roles.
+    - Cross-role request (e.g. PM speaker says "프론트 체크해주세요") → use target role:
+        프론트/프론트엔드/FE     → FRONTEND
+        백엔드/BE/서버           → BACKEND
+        기획/PM                  → PM
+        디자인/design            → DESIGN
+      If SpeakerRoles uses different labels, prefer those verbatim.
+    - Empty array if genuinely ambiguous.
+  target_user: a specific username if explicitly named AND that person is in Speakers.
+  deadline: YYYY-MM-DD if explicit, else Korean phrase like "차주 미팅까지", else "".
 
-Hard constraints:
-- decisions[].origin does not exist; do not invent attribution for decisions.
-- actions[].origin MUST be a username from input Speakers (Source=Human only).
-- WeeklyReports, ReleaseResults, AgentResponses, ExternalRefs MUST NOT receive origin/owner fields.
-- If there are 0 HUMAN_NOTES, decisions/actions/topics MUST be empty arrays.
-- Do NOT move bot/tool results into decisions or actions. Expose them only in the 4 bot-result fields below.
+# Bot/reference fields — extraction guide (CONTEXT_NOTES → 4 fields)
 
-# Bot/tool result fields (first-class, NOT human decisions/actions)
+CONTEXT_NOTES entries are prefixed by source label. Map by prefix:
 
-Extract these only from CONTEXT_NOTES or external paste content:
+weekly_reports  ← entries with prefix "[weekly]" or clearly labeled GitHub weekly analysis.
+  repo:        e.g. "bottle-note/bottle-note-api-server" or just repo name.
+  period_days: 분석 윈도우 일수 (없으면 0).
+  commit_count: 분석된 commit 개수 (없으면 0).
+  highlights:  cleaned 3-5 short bullets. Strip raw markdown headers and verbose sentences.
+               Korean. Each bullet ≤ 80 chars. Keep commit SHAs/PR numbers if mentioned.
 
-1. weekly_reports
-   - Source: ContextNotes entries prefixed with "[weekly]" or clearly labeled GitHub weekly analysis.
-   - One object per weekly report.
-   - highlights: cleaned 3-5 bullets. Do NOT dump raw markdown.
-   - repo/period_days/commit_count: fill only when present; unknown numbers are 0.
+release_results ← entries with prefix "[release]" or clearly labeled release PR creation result.
+  module:      모듈 키 (product/admin/frontend/dashboard 등).
+  prev_version/new_version/bump_type: 명시되면 채움, 모르면 빈 문자열.
+  pr_number/pr_url: 명시되면 채움, 모르면 0/"".
+  highlights:  cleaned 3-5 short bullets. Do NOT dump PR body verbatim.
 
-2. release_results
-   - Source: ContextNotes entries prefixed with "[release]" or clearly labeled release PR creation result.
-   - One object per release result.
-   - highlights: cleaned 3-5 bullets. Do NOT dump PR body verbatim.
-   - pr_number unknown = 0, pr_url unknown = "".
+agent_responses ← entries with prefix "[agent]" or AI question/answer output.
+  question:    user's question (or concise summary if too long).
+  highlights:  AI answer core 3-5 bullets.
 
-3. agent_responses
-   - Source: ContextNotes entries prefixed with "[agent]" or clearly labeled AI question/answer output.
-   - question: user's original question if present, otherwise concise summary.
-   - highlights: AI answer core 3-5 bullets.
+external_refs   ← Source=ExternalPaste note body or pasted external document.
+  title:       paste 첫 줄 또는 핵심 키워드 기반 라벨 (e.g. "Vendor latency 보고서").
+  highlights:  core 수치/관찰 3-5 bullets.
 
-4. external_refs
-   - Source: ExternalPaste note body or attached external document paste.
-   - title: paste first line or concise LLM label from core keywords.
-   - highlights: core numbers/observations 3-5 bullets.
+# Self-check (do this before emitting)
 
-# Anti-hallucination
+Run these checks on your output. If any FAILS, fix and re-emit.
 
-- Use only facts present in input notes. No inferred specs, no guessed names, no padded items.
-- Korean output. Preserve Korean technical terms verbatim.
-- If a category is empty, return an empty array — NEVER fabricate filler items.
-- "open_questions" entries should end with "확인 필요" suffix.
-- Tool output is not a person. Never convert weekly/release/agent/external content into human commitment.
+1. CONTEXT_NOTES bleed check:
+   For each item in done/in_progress/planned/blockers/topics/decisions/actions/shared/open_questions/tags,
+   verify the SUPPORTING SENTENCE comes from a HUMAN_NOTE, not a CONTEXT_NOTE.
+   If you can't find a HUMAN_NOTE supporting it → DELETE it.
+
+2. Empty HUMAN check:
+   If HUMAN_NOTES section in input is "(none)" or empty,
+   ALL 10 human fields MUST be empty arrays. No exceptions.
+
+3. Bot attribution check:
+   weekly_reports/release_results/agent_responses/external_refs MUST NOT have origin/owner/author/by fields.
+   These are tool outputs, not human commitments.
+
+4. No filler:
+   If a category is empty, return [] — never fabricate placeholder items.
+
+5. Korean output, terms verbatim:
+   Output is Korean. Preserve Korean technical terms exactly as spoken.
+   open_questions entries end with "확인 필요".
 `
