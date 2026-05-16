@@ -24,6 +24,10 @@ planned       → string[]                        — future ("예정", "할 것
 blockers      → string[]                        — blocked/risks ("문제", "막힘")
 topics        → Topic[] {title, flow[], insights[]}  — discussion threads, time-clustered
 actions       → SummaryAction[] {what, origin, origin_roles[], target_roles[], target_user, deadline}
+weekly_reports → WeeklyReportSummary[] {repo, period_days, commit_count, highlights[]}
+release_results → ReleaseResultSummary[] {module, prev_version, new_version, bump_type, pr_number, pr_url, highlights[]}
+agent_responses → AgentResponseSummary[] {question, highlights[]}
+external_refs → ExternalRefSummary[] {title, highlights[]}
 shared        → string[]                        — common items not tied to a single role
 open_questions→ string[]                        — undecided questions, "확인 필요" suffix
 tags          → string[]                        — single-token keywords, no spaces
@@ -82,10 +86,44 @@ You will be given two role-tagged note groups in the user message:
 If a fact appears only in CONTEXT_NOTES, you may put it in done/in_progress/planned/blockers
 or topics, but NOT in actions. Actions are commitments made by speakers.
 
+Hard constraints:
+- decisions[].origin does not exist; do not invent attribution for decisions.
+- actions[].origin MUST be a username from input Speakers (Source=Human only).
+- WeeklyReports, ReleaseResults, AgentResponses, ExternalRefs MUST NOT receive origin/owner fields.
+- If there are 0 HUMAN_NOTES, decisions/actions/topics MUST be empty arrays.
+- Do NOT move bot/tool results into decisions or actions. Expose them only in the 4 bot-result fields below.
+
+# Bot/tool result fields (first-class, NOT human decisions/actions)
+
+Extract these only from CONTEXT_NOTES or external paste content:
+
+1. weekly_reports
+   - Source: ContextNotes entries prefixed with "[weekly]" or clearly labeled GitHub weekly analysis.
+   - One object per weekly report.
+   - highlights: cleaned 3-5 bullets. Do NOT dump raw markdown.
+   - repo/period_days/commit_count: fill only when present; unknown numbers are 0.
+
+2. release_results
+   - Source: ContextNotes entries prefixed with "[release]" or clearly labeled release PR creation result.
+   - One object per release result.
+   - highlights: cleaned 3-5 bullets. Do NOT dump PR body verbatim.
+   - pr_number unknown = 0, pr_url unknown = "".
+
+3. agent_responses
+   - Source: ContextNotes entries prefixed with "[agent]" or clearly labeled AI question/answer output.
+   - question: user's original question if present, otherwise concise summary.
+   - highlights: AI answer core 3-5 bullets.
+
+4. external_refs
+   - Source: ExternalPaste note body or attached external document paste.
+   - title: paste first line or concise LLM label from core keywords.
+   - highlights: core numbers/observations 3-5 bullets.
+
 # Anti-hallucination
 
 - Use only facts present in input notes. No inferred specs, no guessed names, no padded items.
 - Korean output. Preserve Korean technical terms verbatim.
 - If a category is empty, return an empty array — NEVER fabricate filler items.
 - "open_questions" entries should end with "확인 필요" suffix.
+- Tool output is not a person. Never convert weekly/release/agent/external content into human commitment.
 `

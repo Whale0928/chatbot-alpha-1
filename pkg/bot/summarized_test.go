@@ -1,6 +1,13 @@
 package bot
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -8,9 +15,70 @@ import (
 
 	"chatbot-alpha-1/pkg/db"
 	"chatbot-alpha-1/pkg/llm"
+	"chatbot-alpha-1/pkg/llm/summarize"
 
 	"github.com/bwmarrin/discordgo"
 )
+
+type recordedHTTPCall struct {
+	method string
+	path   string
+	body   string
+}
+
+type recordingRoundTripper struct {
+	calls []recordedHTTPCall
+}
+
+func (rt *recordingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	rt.calls = append(rt.calls, recordedHTTPCall{
+		method: req.Method,
+		path:   req.URL.Path,
+		body:   string(body),
+	})
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"id":"edited-message"}`)),
+		Request:    req,
+	}, nil
+}
+
+func newBotTestDB(t *testing.T) *db.DB {
+	t.Helper()
+	d, err := db.Open(filepath.Join(t.TempDir(), "bot-test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	if err := d.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	return d
+}
+
+type formatToggleSummarizer struct {
+	fakeSummarizer
+	renderFormatCalls int
+	outputs           map[llm.NoteFormat]string
+	errs              map[llm.NoteFormat]error
+}
+
+func (f *formatToggleSummarizer) RenderFormat(_ context.Context, in summarize.FormatRenderInput) (string, error) {
+	f.renderFormatCalls++
+	if err, ok := f.errs[in.Format]; ok {
+		return "", err
+	}
+	if out, ok := f.outputs[in.Format]; ok {
+		return out, nil
+	}
+	return "rendered " + in.Format.String(), nil
+}
 
 func TestPrepareContentExtractionInput_SeparatesHumanFromContext(t *testing.T) {
 	// given: 5/14 미팅 시나리오 — Human/WeeklyDump/ExternalPaste/InterimSummary 섞임
@@ -125,6 +193,178 @@ func TestPersistSummarizedContent_NoOpWhenDBSessionIDEmpty(t *testing.T) {
 	}
 }
 
+func TestFinalizeSummarized_InitialSendUsesRenderFormatAndPersistsDefaultCache(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+
+	oldDBConn := dbConn
+	t.Cleanup(func() { dbConn = oldDBConn })
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_finalize",
+		ThreadID: "thread-finalize",
+		GuildID:  "guild-finalize",
+		OwnerID:  "owner-finalize",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	content := &llm.SummarizedContent{
+		Decisions: []llm.Decision{{Title: "초기 결정"}},
+		Actions: []llm.SummaryAction{{
+			What: "초기 액션", Origin: "alice",
+			OriginRoles: []string{"BACKEND"}, TargetRoles: []string{"BACKEND"},
+		}},
+		Topics: []llm.Topic{{Title: "초기 토픽", Flow: []string{"흐름"}}},
+	}
+	summ := &fakeSummarizer{
+		extractResp:      content,
+		renderFormatResp: "initial decision render from LLM",
+	}
+	msg := &fakeMessenger{}
+	sess := &Session{
+		ThreadID:      "thread-finalize",
+		DBSessionID:   "sess_finalize",
+		RolesSnapshot: map[string][]string{"u_alice": {"BACKEND"}},
+	}
+	sess.AddNoteWithMeta(Note{
+		Author:      "alice",
+		AuthorID:    "u_alice",
+		AuthorRoles: []string{"BACKEND"},
+		Content:     "초기 발화",
+		Source:      db.SourceHuman,
+	})
+	now := time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC)
+
+	keep := FinalizeSummarized(ctx, msg, summ, sess, now)
+
+	if keep {
+		t.Fatalf("keepSession = true, want false")
+	}
+	if summ.extractCalls != 1 {
+		t.Fatalf("ExtractContent calls = %d, want 1", summ.extractCalls)
+	}
+	if summ.renderFormatCalls != 1 {
+		t.Fatalf("RenderFormat calls = %d, want 1", summ.renderFormatCalls)
+	}
+	if summ.lastRenderFormat.Format != llm.FormatDecisionStatus {
+		t.Fatalf("RenderFormat format = %s, want %s", summ.lastRenderFormat.Format, llm.FormatDecisionStatus)
+	}
+	if summ.lastRenderFormat.Content != content {
+		t.Fatalf("RenderFormat content pointer mismatch")
+	}
+	if got := summ.lastRenderFormat.Speakers; !reflect.DeepEqual(got, []string{"alice"}) {
+		t.Fatalf("RenderFormat speakers = %v, want [alice]", got)
+	}
+	if got := summ.lastRenderFormat.SpeakerRoles["alice"]; !reflect.DeepEqual(got, []string{"BACKEND"}) {
+		t.Fatalf("RenderFormat speaker roles = %v, want [BACKEND]", got)
+	}
+	if len(msg.complexPayloads) != 1 {
+		t.Fatalf("complex sends = %d, want 1", len(msg.complexPayloads))
+	}
+	payload := msg.complexPayloads[0]
+	if len(payload.Embeds) != 1 || payload.Embeds[0].Description != "initial decision render from LLM" {
+		t.Fatalf("embed description = %#v, want LLM render", payload.Embeds)
+	}
+	if len(payload.Components) != 1 {
+		t.Fatalf("components = %d, want 1 row", len(payload.Components))
+	}
+
+	var count int
+	if err := d.QueryRowContext(ctx, "SELECT COUNT(*) FROM finalize_runs").Scan(&count); err != nil {
+		t.Fatalf("count finalize_runs: %v", err)
+	}
+	var format, directive, output string
+	if err := d.QueryRowContext(ctx,
+		"SELECT format, directive, output_md FROM finalize_runs",
+	).Scan(&format, &directive, &output); err != nil {
+		t.Fatalf("query finalize_runs: %v", err)
+	}
+	if count != 1 || format != string(db.FormatDecisionStatus) || directive != "" || output != "initial decision render from LLM" {
+		t.Fatalf("finalize_run = count:%d format:%q directive:%q output:%q", count, format, directive, output)
+	}
+}
+
+func TestFinalizeSummarized_RenderFormatFailureFallsBackToPureRender(t *testing.T) {
+	ctx := context.Background()
+	content := &llm.SummarizedContent{
+		Decisions: []llm.Decision{{Title: "fallback decision"}},
+	}
+	summ := &fakeSummarizer{
+		extractResp:     content,
+		renderFormatErr: errors.New("llm down"),
+	}
+	msg := &fakeMessenger{}
+	sess := &Session{ThreadID: "thread-fallback"}
+	sess.AddNoteWithMeta(Note{Author: "alice", Content: "fallback input", Source: db.SourceHuman})
+
+	keep := FinalizeSummarized(ctx, msg, summ, sess, time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC))
+
+	if keep {
+		t.Fatalf("keepSession = true, want false")
+	}
+	if summ.renderFormatCalls != 1 {
+		t.Fatalf("RenderFormat calls = %d, want 1", summ.renderFormatCalls)
+	}
+	if len(msg.complexPayloads) != 1 || len(msg.complexPayloads[0].Embeds) != 1 {
+		t.Fatalf("complex embed send missing: %#v", msg.complexPayloads)
+	}
+	got := msg.complexPayloads[0].Embeds[0].Description
+	if !strings.Contains(got, "# 2026-05-14") || !strings.Contains(got, "fallback decision") {
+		t.Fatalf("fallback render missing expected content:\n%s", got)
+	}
+}
+
+func TestFinalizeSummarized_RenderFormatFailureDoesNotPersistFallbackRun(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+
+	oldDBConn := dbConn
+	t.Cleanup(func() { dbConn = oldDBConn })
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_finalize_fallback_no_cache",
+		ThreadID: "thread-finalize-fallback-no-cache",
+		GuildID:  "guild-finalize-fallback-no-cache",
+		OwnerID:  "owner-finalize-fallback-no-cache",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	content := &llm.SummarizedContent{
+		Decisions: []llm.Decision{{Title: "fallback decision no cache"}},
+	}
+	summ := &fakeSummarizer{
+		extractResp:     content,
+		renderFormatErr: errors.New("llm down"),
+	}
+	msg := &fakeMessenger{}
+	sess := &Session{
+		ThreadID:    "thread-finalize-fallback-no-cache",
+		DBSessionID: "sess_finalize_fallback_no_cache",
+	}
+	sess.AddNoteWithMeta(Note{Author: "alice", Content: "fallback input", Source: db.SourceHuman})
+
+	keep := FinalizeSummarized(ctx, msg, summ, sess, time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC))
+
+	if keep {
+		t.Fatalf("keepSession = true, want false")
+	}
+	var count int
+	if err := d.QueryRowContext(ctx, "SELECT COUNT(*) FROM finalize_runs").Scan(&count); err != nil {
+		t.Fatalf("count finalize_runs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("finalize_runs count = %d, want 0 for fallback render", count)
+	}
+}
+
 // =====================================================================
 // chunk 3c — 토글 button + 포맷 변환 테스트
 // =====================================================================
@@ -217,5 +457,246 @@ func TestRenderSummarizedByFormat_AllFourFormats(t *testing.T) {
 				t.Errorf("format %s missing date header:\n%s", f, got)
 			}
 		})
+	}
+}
+
+func TestFormatToggleDiscordTimeoutIs90Seconds(t *testing.T) {
+	raw, err := os.ReadFile("discord.go")
+	if err != nil {
+		t.Fatalf("ReadFile discord.go: %v", err)
+	}
+	src := string(raw)
+	start := strings.Index(src, "case customIDFormatToggleDecisionStatus,")
+	if start < 0 {
+		t.Fatal("format toggle case not found")
+	}
+	rest := src[start:]
+	end := strings.Index(rest, "case customIDFinalizeSummarized:")
+	if end < 0 {
+		t.Fatal("finalize summarized case not found after format toggle case")
+	}
+	block := rest[:end]
+	if !strings.Contains(block, "context.WithTimeout(context.Background(), 90*time.Second)") {
+		t.Fatalf("format toggle timeout must be 90s, block:\n%s", block)
+	}
+}
+
+func TestHandleFormatToggle_UsesFinalizeRunCache(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+
+	oldDBConn := dbConn
+	oldSummarizer := summarizer
+	t.Cleanup(func() {
+		dbConn = oldDBConn
+		summarizer = oldSummarizer
+	})
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_cache",
+		ThreadID: "thread-cache",
+		GuildID:  "guild-cache",
+		OwnerID:  "owner-cache",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	content := &llm.SummarizedContent{
+		Decisions: []llm.Decision{{Title: "캐시 결정"}},
+		Topics:    []llm.Topic{{Title: "캐시 토픽", Flow: []string{"논의 흐름"}}},
+		Actions: []llm.SummaryAction{{
+			What: "캐시 액션", Origin: "alice",
+			OriginRoles: []string{"BACKEND"}, TargetRoles: []string{"BACKEND"},
+		}},
+	}
+	raw, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("Marshal summarized content: %v", err)
+	}
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID:          "sc_cache",
+		SessionID:   "sess_cache",
+		Content:     raw,
+		ExtractedAt: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent: %v", err)
+	}
+
+	summ := &formatToggleSummarizer{
+		outputs: map[llm.NoteFormat]string{
+			llm.FormatDecisionStatus: "decision render from LLM",
+			llm.FormatDiscussion:     "discussion render from LLM",
+			llm.FormatRoleBased:      "role render from LLM",
+			llm.FormatFreeform:       "freeform render from LLM",
+		},
+	}
+	summarizer = summ
+
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID: "app-cache",
+			Token: "token-cache",
+		},
+	}
+	sess := &Session{
+		ThreadID:      "thread-cache",
+		DBSessionID:   "sess_cache",
+		RolesSnapshot: map[string][]string{"u_alice": {"BACKEND"}},
+	}
+	sess.AddNoteWithMeta(Note{
+		Author:      "alice",
+		AuthorID:    "u_alice",
+		AuthorRoles: []string{"BACKEND"},
+		Content:     "캐시 테스트",
+		Source:      db.SourceHuman,
+	})
+
+	toggle := func(customID, wantBody string, wantRenderCalls int, wantFinalizeRuns int) {
+		t.Helper()
+		beforeHTTP := len(rt.calls)
+
+		HandleFormatToggle(ctx, discordSession, interaction, sess, customID)
+
+		if summ.renderFormatCalls != wantRenderCalls {
+			t.Fatalf("RenderFormat calls = %d, want %d", summ.renderFormatCalls, wantRenderCalls)
+		}
+		if len(rt.calls) != beforeHTTP+1 {
+			t.Fatalf("HTTP calls delta = %d, want 1", len(rt.calls)-beforeHTTP)
+		}
+		call := rt.calls[len(rt.calls)-1]
+		if call.method != http.MethodPatch {
+			t.Fatalf("HTTP method = %s, want PATCH", call.method)
+		}
+		if !strings.Contains(call.body, wantBody) {
+			t.Fatalf("edit body missing %q:\n%s", wantBody, call.body)
+		}
+
+		var count int
+		if err := d.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM finalize_runs WHERE summarized_content_id = ?",
+			"sc_cache",
+		).Scan(&count); err != nil {
+			t.Fatalf("count finalize_runs: %v", err)
+		}
+		if count != wantFinalizeRuns {
+			t.Fatalf("finalize_runs count = %d, want %d", count, wantFinalizeRuns)
+		}
+	}
+
+	cases := []struct {
+		customID string
+		format   llm.NoteFormat
+		body     string
+	}{
+		{customIDFormatToggleDecisionStatus, llm.FormatDecisionStatus, "decision render from LLM"},
+		{customIDFormatToggleDiscussion, llm.FormatDiscussion, "discussion render from LLM"},
+		{customIDFormatToggleRoleBased, llm.FormatRoleBased, "role render from LLM"},
+		{customIDFormatToggleFreeform, llm.FormatFreeform, "freeform render from LLM"},
+	}
+	for idx, tc := range cases {
+		wantCalls := idx + 1
+		wantRuns := idx + 1
+		toggle(tc.customID, tc.body, wantCalls, wantRuns)
+
+		summ.outputs[tc.format] = "rerender should not be used"
+		toggle(tc.customID, tc.body, wantCalls, wantRuns)
+	}
+}
+
+func TestHandleFormatToggle_RenderFormatFailureFallsBackWithoutCachingPureRender(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+
+	oldDBConn := dbConn
+	oldSummarizer := summarizer
+	t.Cleanup(func() {
+		dbConn = oldDBConn
+		summarizer = oldSummarizer
+	})
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_toggle_fallback",
+		ThreadID: "thread-toggle-fallback",
+		GuildID:  "guild-toggle-fallback",
+		OwnerID:  "owner-toggle-fallback",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	content := &llm.SummarizedContent{
+		Decisions: []llm.Decision{{Title: "fallback cached decision"}},
+	}
+	raw, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("Marshal summarized content: %v", err)
+	}
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID:          "sc_toggle_fallback",
+		SessionID:   "sess_toggle_fallback",
+		Content:     raw,
+		ExtractedAt: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent: %v", err)
+	}
+
+	summ := &formatToggleSummarizer{
+		errs: map[llm.NoteFormat]error{
+			llm.FormatDecisionStatus: errors.New("llm down"),
+		},
+	}
+	summarizer = summ
+
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID: "app-toggle-fallback",
+			Token: "token-toggle-fallback",
+		},
+	}
+	sess := &Session{
+		ThreadID:    "thread-toggle-fallback",
+		DBSessionID: "sess_toggle_fallback",
+	}
+	sess.AddNoteWithMeta(Note{Author: "alice", Content: "toggle fallback", Source: db.SourceHuman})
+
+	HandleFormatToggle(ctx, discordSession, interaction, sess, customIDFormatToggleDecisionStatus)
+
+	if summ.renderFormatCalls != 1 {
+		t.Fatalf("RenderFormat calls = %d, want 1", summ.renderFormatCalls)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
+	}
+	if !strings.Contains(rt.calls[0].body, "# 2026-05-14") || !strings.Contains(rt.calls[0].body, "fallback cached decision") {
+		t.Fatalf("edit body missing fallback render:\n%s", rt.calls[0].body)
+	}
+	var count int
+	if err := d.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM finalize_runs WHERE summarized_content_id = ? AND format = ?",
+		"sc_toggle_fallback", string(db.FormatDecisionStatus),
+	).Scan(&count); err != nil {
+		t.Fatalf("count fallback finalize_run: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("fallback finalize_runs count = %d, want 0", count)
 	}
 }

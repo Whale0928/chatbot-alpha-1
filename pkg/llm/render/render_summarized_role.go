@@ -31,6 +31,8 @@ import (
 //
 // RolesSnapshot이 비어 있어도 actions 자체에 role 정보가 있으면 동작 가능.
 // 그러나 RolesSnapshot이 있으면 "members: alice, bob" 표시로 그룹 가시성 향상.
+//
+// Deprecated: Stage 4 LLM (summarize.RenderFormat)으로 대체. fallback 용도로만 호출 가능 (LLM 장애 시).
 func RenderSummarizedRoleBased(in SummarizedRenderInput) string {
 	if in.Content == nil {
 		return ""
@@ -95,6 +97,7 @@ func RenderSummarizedRoleBased(in SummarizedRenderInput) string {
 	}
 
 	writeMDBulletSection(&b, "미정 질문", c.OpenQuestions)
+	writeToolReferenceSections(&b, c)
 	writeSummarizedFooter(&b, in.Speakers, c.Tags)
 	return b.String()
 }

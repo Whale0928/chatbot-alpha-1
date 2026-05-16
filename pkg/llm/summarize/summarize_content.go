@@ -18,6 +18,7 @@ import (
 )
 
 // summarizedContentSchema는 llm.SummarizedContent 타입에서 생성한 JSON Schema 캐시.
+// SummarizedContent에 봇 결과 필드가 추가되면 response_format 스키마도 함께 갱신된다.
 var summarizedContentSchema = llm.GenerateSchema[llm.SummarizedContent]()
 
 // ContentExtractionInput은 정리본 1회 추출의 입력.
@@ -25,7 +26,7 @@ var summarizedContentSchema = llm.GenerateSchema[llm.SummarizedContent]()
 // 거시 디자인 결정 6 (환각 방어) 호출 계약:
 //   - HumanNotes는 Source.IsAttributionCandidate()=true인 노트만 (Source=Human)
 //   - ContextNotes는 corpus엔 포함되지만 attribution 후보 아닌 노트
-//     (WeeklyDump / ReleaseResult / AgentOutput / ExternalPaste)
+//     ([weekly] / [release] / [agent] / ExternalPaste)
 //   - Speakers는 HumanNotes의 author 집합 (validate가 action.origin을 이 안으로 강제)
 //   - SpeakerRoles는 발화자 username → Discord guild role snapshot
 //
@@ -96,9 +97,9 @@ func ExtractContent(ctx context.Context, c *llm.Client, in ContentExtractionInpu
 // buildContentExtractionUserMessage는 LLM에 전달할 user message를 구성한다.
 //
 // 구조:
-//   1. 날짜 + 참석자 + SpeakerRoles 매핑
-//   2. HUMAN_NOTES (action.origin 후보)
-//   3. CONTEXT_NOTES (참고만, action.origin 후보 아님)
+//  1. 날짜 + 참석자 + SpeakerRoles 매핑
+//  2. HUMAN_NOTES (action.origin 후보)
+//  3. CONTEXT_NOTES (참고만, action.origin 후보 아님)
 //
 // 두 그룹을 명시 분리하는 것이 환각 방어의 토대 (system prompt의 attribution rule과 짝).
 func buildContentExtractionUserMessage(in ContentExtractionInput) string {
@@ -139,7 +140,7 @@ func buildContentExtractionUserMessage(in ContentExtractionInput) string {
 		}
 	}
 
-	b.WriteString("\n=== CONTEXT_NOTES (background only, NEVER action.origin) ===\n")
+	b.WriteString("\n=== CONTEXT_NOTES (bot/tool/external results, NEVER action.origin) ===\n")
 	if len(in.ContextNotes) == 0 {
 		b.WriteString("(none)\n")
 	} else {
