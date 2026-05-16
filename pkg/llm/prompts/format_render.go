@@ -68,6 +68,10 @@ const formatRenderCommon = `You rerender an already-extracted SummarizedContent 
                  - {highlight 1}
                  - {highlight 2}
      external: - 외부 자료 — {title}
+                 - {highlight 1}
+                 - {highlight 2}
+   (external_refs도 agent와 동일: highlights가 있으면 sub-bullet으로 모두 출력. 누락 금지.
+    highlights가 비면 title 1줄만.)
    [REPO_CODE] / [MODULE_CODE]는 그 값을 단일 backtick으로 감싼 inline code 표기.
 
    ATTRIBUTION: 흡수된 항목과 메타 line 모두 human attribution 없음. 출처 sub-bullet만.
@@ -225,9 +229,14 @@ D) agent_responses / external_refs: role 그룹에 배치 안 함 — 항상 공
 |-------------------------------------|-------------------------------------------------------------------------------------|
 | 팀에 함께 공유한 내용               | shared                                                                              |
 | 모두에게 적용되는 공통 결정         | decisions                                                                           |
+| 이번 주에 완료한 작업 (공통)        | role 매핑 실패한 done[] 항목 + role 매핑 실패한 weekly/release highlights          |
+| 현재 진행 중인 작업 (공통)          | role 매핑 실패한 in_progress[] 항목                                                |
+| 곧 시작할 작업 (공통)               | role 매핑 실패한 planned[] 항목                                                    |
 | 더 확인이 필요한 부분               | open_questions + blockers (rule 8 중복 방지)                                       |
 | 회의에서 함께 참고한 자료           | role 매핑 안 된 weekly/release 메타 + 모든 agent_responses + 모든 external_refs    |
 | 관련 키워드                          | tags                                                                                |
+
+매핑 실패 작업 항목은 어디에도 누락되지 않게 위 "(공통)" 헤더로 흡수. 빈 경우 헤더째 제거.
 
 CRITICAL (정책 통일):
   - 매핑 가능한 weekly/release: highlights는 해당 role 그룹의 "이번 주에 마무리한 작업"에 흡수,

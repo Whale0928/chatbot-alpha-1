@@ -101,6 +101,26 @@ func TestFormatRenderRoleBased_봇결과_role매핑(t *testing.T) {
 	})
 }
 
+// Codex re-review P2: role 매핑 실패 작업이 공통 fallback에 누락되지 않게 헤더 표준화.
+func TestFormatRenderRoleBased_매핑실패_공통fallback헤더(t *testing.T) {
+	mustContain(t, "role_based fallback headers", FormatRenderRoleBased, []string{
+		`이번 주에 완료한 작업 (공통)`,
+		`현재 진행 중인 작업 (공통)`,
+		`곧 시작할 작업 (공통)`,
+		`role 매핑 실패한 done[] 항목`,
+		`매핑 실패 작업 항목은 어디에도 누락되지 않게`,
+	})
+}
+
+// Codex re-review P2: external_refs highlights도 sub-bullet으로 출력 강제.
+func TestFormatRenderCommon_external_refs_highlights_노출(t *testing.T) {
+	mustContain(t, "external_refs highlights", formatRenderCommon, []string{
+		`external_refs도 agent와 동일`,
+		`highlights가 있으면 sub-bullet으로 모두 출력`,
+		`누락 금지`,
+	})
+}
+
 func TestFormatRenderFreeform_표준헤더_완전성(t *testing.T) {
 	// freeform에도 done/in_progress/planned/shared 도착지가 있어야 한다 (Copilot #7).
 	mustContain(t, "freeform standard headers", FormatRenderFreeform, []string{
