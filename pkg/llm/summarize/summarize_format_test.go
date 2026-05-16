@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -183,8 +182,9 @@ func TestRenderFormat_빈SummarizedContent도_없음섹션_markdown을_반환한
 	}
 }
 
-func TestRenderFormat_BulletDepth1단을_검증한다(t *testing.T) {
-	markdown := "## 결정\n- 1차 bullet\n  - 2차 bullet 허용\n- 다음 항목"
+// v3.2 정책: 1뎁스(0 space) + 2뎁스(2 space) + 3뎁스(4 space) OK, 4뎁스(6 space) 거부.
+func TestRenderFormat_BulletDepth3단까지_허용(t *testing.T) {
+	markdown := "## 결정\n- 1차 bullet\n  - 2차 bullet 허용\n    - 3차 bullet 허용\n- 다음 항목"
 	var requests []renderFormatRequest
 	c := newRenderFormatStubClient(t, mustMarkdownJSON(t, markdown), http.StatusOK, &requests)
 
@@ -192,9 +192,23 @@ func TestRenderFormat_BulletDepth1단을_검증한다(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderFormat returned error: %v", err)
 	}
-	deepBullet := regexp.MustCompile(`(?m)^\s{4,}-`)
-	if deepBullet.MatchString(got) {
-		t.Fatalf("bullet depth exceeded 1 nested level:\n%s", got)
+	if got != markdown {
+		t.Fatalf("markdown mismatch want=%q got=%q", markdown, got)
+	}
+}
+
+func TestRenderFormat_BulletDepth4단이상_거부(t *testing.T) {
+	// 6 space (4뎁스) 이상 bullet은 validator가 거부 → fallback renderer로 떨어진다.
+	markdown := "## 결정\n- 1차\n  - 2차\n    - 3차\n      - 4차 (이건 거부됨)"
+	var requests []renderFormatRequest
+	c := newRenderFormatStubClient(t, mustMarkdownJSON(t, markdown), http.StatusOK, &requests)
+
+	_, err := RenderFormat(context.Background(), c, sampleFormatRenderInput(llm.FormatFreeform))
+	if err == nil {
+		t.Fatal("expected validator to reject 4-depth bullet, got nil")
+	}
+	if !strings.Contains(err.Error(), "bullet depth exceeded two nested levels") {
+		t.Fatalf("expected 'bullet depth exceeded two nested levels' error, got: %v", err)
 	}
 }
 

@@ -58,9 +58,11 @@ FORBIDDEN (these will be rejected as hallucination):
   - Reframing a bot output as a human commitment (e.g. weekly's "푸시 기능 제거됨" →
     actions[] "푸시 기능 제거" with some origin guess).
 
-Consequence of the rule:
+Consequence of the rule (Stage 3 extraction은 schema 분리만 책임. 렌더 동작은 Stage 4 책임):
   - If HUMAN_NOTES is empty, ALL 10 human fields MUST be empty arrays.
-    The renderer will then show only the reference section ("참고 자료") with bot results.
+    (Stage 4 v3.2 정책: weekly/release highlights는 "이번 주에 완료한 작업" 섹션으로 흡수 표시되므로
+    HUMAN 비어도 그 섹션이 노출될 수 있다. 하지만 그건 render 단계의 표시 정책일 뿐,
+    Stage 3에서 highlight를 done[]에 복사하지 말 것. 분리 유지.)
   - If CONTEXT_NOTES is empty, all 4 bot fields MUST be empty.
 
 # Human fields — extraction guide
@@ -95,26 +97,33 @@ actions     { what, origin, origin_roles, target_roles, target_user, deadline }
 
 # Bot/reference fields — extraction guide (CONTEXT_NOTES → 4 fields)
 
-CONTEXT_NOTES entries are prefixed by source label. Map by prefix:
+CONTEXT_NOTES entries arrive as "[C#] {author}: {content}".
+호출자 코드가 author에 source 라벨을 박는다:
+  - "[weekly]"  → weekly_reports
+  - "[release]" → release_results
+  - "[agent]"   → agent_responses
+  - 그 외 (일반 username)는 외부 paste → external_refs
 
-weekly_reports  ← entries with prefix "[weekly]" or clearly labeled GitHub weekly analysis.
+라벨이 없는 author로 들어온 항목은 무조건 external_refs로 처리. 임의로 다른 봇 필드에 추측 분류 금지.
+
+weekly_reports  ← entries with author "[weekly]" or clearly labeled GitHub weekly analysis.
   repo:        e.g. "bottle-note/bottle-note-api-server" or just repo name.
   period_days: 분석 윈도우 일수 (없으면 0).
   commit_count: 분석된 commit 개수 (없으면 0).
   highlights:  cleaned 3-5 short bullets. Strip raw markdown headers and verbose sentences.
                Korean. Each bullet ≤ 80 chars. Keep commit SHAs/PR numbers if mentioned.
 
-release_results ← entries with prefix "[release]" or clearly labeled release PR creation result.
+release_results ← entries with author "[release]" or clearly labeled release PR creation result.
   module:      모듈 키 (product/admin/frontend/dashboard 등).
   prev_version/new_version/bump_type: 명시되면 채움, 모르면 빈 문자열.
   pr_number/pr_url: 명시되면 채움, 모르면 0/"".
   highlights:  cleaned 3-5 short bullets. Do NOT dump PR body verbatim.
 
-agent_responses ← entries with prefix "[agent]" or AI question/answer output.
+agent_responses ← entries with author "[agent]" or AI question/answer output.
   question:    user's question (or concise summary if too long).
   highlights:  AI answer core 3-5 bullets.
 
-external_refs   ← Source=ExternalPaste note body or pasted external document.
+external_refs   ← entries with normal username author (no "[weekly]"/"[release]"/"[agent]" prefix) — Source=ExternalPaste note body.
   title:       paste 첫 줄 또는 핵심 키워드 기반 라벨 (e.g. "Vendor latency 보고서").
   highlights:  core 수치/관찰 3-5 bullets.
 
