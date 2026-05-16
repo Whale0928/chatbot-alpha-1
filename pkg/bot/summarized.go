@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -279,7 +280,7 @@ func FinalizeSummarized(
 	}
 	if _, err := msg.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
 		Embeds:     []*discordgo.MessageEmbed{embed},
-		Components: formatToggleComponents(defaultFormat),
+		Components: formatToggleComponents(defaultFormat, scID),
 	}); err != nil {
 		log.Printf("[미팅/finalize_summarized] ERR 정리본+토글 전송 실패: %v", err)
 		return true
@@ -351,33 +352,59 @@ func renderSummarizedByFormat(
 // chunk 3c — 정리본 메시지의 4 포맷 토글 button + 토글 핸들러
 // =====================================================================
 
-// formatToggleComponents는 정리본 메시지에 첨부되는 4 포맷 토글 button row를 생성한다.
-// 모든 4 button을 한 row에 (Discord 5-button-per-row 제약 안에 적합).
+// formatToggleComponents는 정리본 메시지에 첨부되는 4 포맷 토글 + [복사] button row를 생성한다.
+// Discord는 한 ActionsRow에 button 5개까지 — 토글 4 + 복사 1 = 5, 한 row에 모두 적합.
 //
 // 활성 포맷 button은 SuccessButton (강조), 나머지는 SecondaryButton.
-func formatToggleComponents(active llm.NoteFormat) []discordgo.MessageComponent {
+// [복사] button은 PrimaryButton (시각 구분, 항상 active 무관).
+//
+// scID는 정리본 ID. 빈 문자열이 아니면 모든 button customID에 ":scID" suffix로 붙여
+// 옛 메시지 클릭 시에도 정확한 정리본 행을 조회 가능하게 한다 (Codex review PR #14 2-3차 P2).
+// 옛 메시지 호환을 위해 빈 문자열 호출도 허용 (suffix 없는 customID).
+//
+// CustomID 형식: "{base}:scID" (예: format_copy:sc_1730000000000000_1).
+// Discord customID 100자 한도 — base + sc_id 약 40-50자라 적합.
+func formatToggleComponents(active llm.NoteFormat, scID string) []discordgo.MessageComponent {
 	style := func(f llm.NoteFormat) discordgo.ButtonStyle {
 		if f == active {
 			return discordgo.SuccessButton
 		}
 		return discordgo.SecondaryButton
 	}
+	suffix := ""
+	if scID != "" {
+		suffix = ":" + scID
+	}
 	return []discordgo.MessageComponent{
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
-				discordgo.Button{Label: "결정+진행", Style: style(llm.FormatDecisionStatus), CustomID: customIDFormatToggleDecisionStatus},
-				discordgo.Button{Label: "논의", Style: style(llm.FormatDiscussion), CustomID: customIDFormatToggleDiscussion},
-				discordgo.Button{Label: "역할별", Style: style(llm.FormatRoleBased), CustomID: customIDFormatToggleRoleBased},
-				discordgo.Button{Label: "자율", Style: style(llm.FormatFreeform), CustomID: customIDFormatToggleFreeform},
+				discordgo.Button{Label: "결정+진행", Style: style(llm.FormatDecisionStatus), CustomID: customIDFormatToggleDecisionStatus + suffix},
+				discordgo.Button{Label: "논의", Style: style(llm.FormatDiscussion), CustomID: customIDFormatToggleDiscussion + suffix},
+				discordgo.Button{Label: "역할별", Style: style(llm.FormatRoleBased), CustomID: customIDFormatToggleRoleBased + suffix},
+				discordgo.Button{Label: "자율", Style: style(llm.FormatFreeform), CustomID: customIDFormatToggleFreeform + suffix},
+				discordgo.Button{Label: "복사", Style: discordgo.PrimaryButton, CustomID: customIDFormatCopy + suffix},
 			},
 		},
 	}
 }
 
+// parseToggleCustomID는 button customID에서 (base, scID) 추출.
+// 옛 메시지(suffix 없음)는 (customID, "") 반환.
+// 형식: "{base}:scID" 또는 "{base}".
+func parseToggleCustomID(customID string) (base, scID string) {
+	idx := strings.Index(customID, ":")
+	if idx < 0 {
+		return customID, ""
+	}
+	return customID[:idx], customID[idx+1:]
+}
+
 // formatFromToggleCustomID는 토글 button custom_id를 NoteFormat으로 변환한다.
 // formatFromCustomID(legacy finalize button)와 별개 — toggle은 다른 customID 네임스페이스.
+// customID에 ":sc_id" suffix가 있으면 base 부분만 비교 (parseToggleCustomID로 분리).
 func formatFromToggleCustomID(id string) (llm.NoteFormat, bool) {
-	switch id {
+	base, _ := parseToggleCustomID(id)
+	switch base {
 	case customIDFormatToggleDecisionStatus:
 		return llm.FormatDecisionStatus, true
 	case customIDFormatToggleDiscussion:
@@ -389,6 +416,39 @@ func formatFromToggleCustomID(id string) (llm.NoteFormat, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// activeFormatFromMessage는 정리본 메시지 button row에서 SuccessButton(active 토글) 의
+// customID를 찾아 현재 활성 포맷을 식별한다. 식별 실패 시 (false) 반환.
+//
+// 사용: HandleFormatCopy가 embed.Description(잘릴 수 있음) 대신 DB의 full markdown을
+// 조회하기 위해 활성 포맷을 알아야 한다.
+//
+// 메시지 구조: ActionsRow [Button×4(토글) + Button×1(복사)]. SuccessButton 1개는 active 토글.
+// 복사 button은 PrimaryButton이라 매치 X. 토글 customID에 매칭되지 않는 button은 무시.
+func activeFormatFromMessage(msg *discordgo.Message) (llm.NoteFormat, bool) {
+	if msg == nil {
+		return 0, false
+	}
+	for _, comp := range msg.Components {
+		row, ok := comp.(*discordgo.ActionsRow)
+		if !ok {
+			continue
+		}
+		for _, sub := range row.Components {
+			btn, ok := sub.(*discordgo.Button)
+			if !ok {
+				continue
+			}
+			if btn.Style != discordgo.SuccessButton {
+				continue
+			}
+			if f, ok := formatFromToggleCustomID(btn.CustomID); ok {
+				return f, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // formatToDBKind은 llm.NoteFormat을 db.FormatKind로 변환 (DB persist용).
@@ -460,9 +520,23 @@ func HandleFormatToggle(
 		return
 	}
 
-	scRow, err := dbConn.GetLatestSummarizedContent(ctx, sess.DBSessionID)
+	// customID의 sc_id suffix 우선 — 옛 정리본 메시지 토글 시 그 메시지의 sc를 조회.
+	// 없으면 (옛 메시지 호환) GetLatestSummarizedContent fallback.
+	_, scIDFromBtn := parseToggleCustomID(customID)
+	var scRow db.SummarizedContent
+	var err error
+	if scIDFromBtn != "" {
+		scRow, err = dbConn.GetSummarizedContentByID(ctx, scIDFromBtn)
+		if err != nil {
+			log.Printf("[미팅/format_toggle] WARN GetSummarizedContentByID failed sc=%s: %v — fallback to latest",
+				scIDFromBtn, err)
+			scRow, err = dbConn.GetLatestSummarizedContent(ctx, sess.DBSessionID)
+		}
+	} else {
+		scRow, err = dbConn.GetLatestSummarizedContent(ctx, sess.DBSessionID)
+	}
 	if err != nil {
-		log.Printf("[미팅/format_toggle] ERR GetLatestSummarizedContent thread=%s: %v", sess.ThreadID, err)
+		log.Printf("[미팅/format_toggle] ERR sc lookup thread=%s: %v", sess.ThreadID, err)
 		sendFollowup("정리본 데이터를 찾을 수 없습니다. 다시 [정리본 통합·토글] 버튼을 눌러주세요.")
 		return
 	}
@@ -479,11 +553,54 @@ func HandleFormatToggle(
 		log.Printf("[meeting/format_toggle] cache_miss thread=%s format=%s sc=%s — LLM call",
 			sess.ThreadID, format, scRow.ID)
 
+		// Codex review (PR #13) P2: parse 먼저 — placeholder edit 전에 검증.
+		// 옛 순서로는 parse 실패 시 메시지가 "다시 만드는 중"으로 영구 stuck됐다.
 		var content llm.SummarizedContent
 		if err := json.Unmarshal(scRow.Content, &content); err != nil {
 			log.Printf("[미팅/format_toggle] ERR unmarshal sc=%s: %v", scRow.ID, err)
 			sendFollowup("정리본 파싱에 실패했습니다.")
 			return
+		}
+
+		// Copilot review (PR #13 #3) P2: 인플라이트 가드.
+		// LLM 호출 3-10초 동안 사용자가 다른 토글 button 연속 클릭 시 중복 LLM 호출 가능.
+		// 첫 cache miss 호출이 끝날 때까지 다른 토글은 거부 (ephemeral followup).
+		// cache hit은 InFlight 무관 (이미 위 case에서 return).
+		sess.NotesMu.Lock()
+		if sess.FormatToggleInFlight {
+			sess.NotesMu.Unlock()
+			logGuard("meeting/format_toggle", "in_flight",
+				"이미 다른 포맷 cache miss LLM 호출 진행 중 — 중복 클릭 거부",
+				lf("thread", sess.ThreadID), lf("custom_id", customID))
+			sendFollowup("이전 포맷 변환이 아직 진행 중입니다. 잠시 기다린 뒤 다시 눌러주세요.")
+			return
+		}
+		sess.FormatToggleInFlight = true
+		sess.NotesMu.Unlock()
+		// 어떤 분기로 끝나든 InFlight 해제 — panic/return 무관.
+		defer func() {
+			sess.NotesMu.Lock()
+			sess.FormatToggleInFlight = false
+			sess.NotesMu.Unlock()
+		}()
+
+		// Option 2 UX — cache miss는 LLM 호출 3-10초 걸려서 사용자가 "버튼 눌렀는데 반응 없음"으로 체감.
+		// parse 성공 후 placeholder embed로 edit해서 시각 피드백 제공.
+		// active 토글 button은 새 포맷으로 미리 강조 → 어떤 포맷 로딩 중인지 명확.
+		placeholderEmbed := &discordgo.MessageEmbed{
+			Description: fmt.Sprintf("**%s** 포맷으로 정리본을 다시 만드는 중입니다…\n\n잠시만 기다려주세요. (보통 3~10초 소요)",
+				labelForFormat(format)),
+		}
+		emptyContent := ""
+		placeholderEdit := &discordgo.WebhookEdit{
+			Content:    &emptyContent,
+			Embeds:     &[]*discordgo.MessageEmbed{placeholderEmbed},
+			Components: ptrComponents(formatToggleComponents(format, scRow.ID)),
+		}
+		if _, err := s.InteractionResponseEdit(i.Interaction, placeholderEdit); err != nil {
+			// placeholder 실패는 치명 X — 로그만 남기고 LLM 호출 진행. 최종 edit에서 다시 시도.
+			log.Printf("[미팅/format_toggle] WARN placeholder edit 실패 (LLM 호출은 계속) thread=%s: %v",
+				sess.ThreadID, err)
 		}
 
 		// 렌더 입력 — speakers/roles는 in-memory 세션 또는 DB에서. Phase 2에선 in-memory 우선.
@@ -533,7 +650,7 @@ func HandleFormatToggle(
 	editMsg := &discordgo.WebhookEdit{
 		Content:    &emptyContent,
 		Embeds:     &[]*discordgo.MessageEmbed{embed},
-		Components: ptrComponents(formatToggleComponents(format)),
+		Components: ptrComponents(formatToggleComponents(format, scRow.ID)),
 	}
 	if _, err := s.InteractionResponseEdit(i.Interaction, editMsg); err != nil {
 		log.Printf("[미팅/format_toggle] ERR InteractionResponseEdit thread=%s: %v", sess.ThreadID, err)
@@ -544,6 +661,147 @@ func HandleFormatToggle(
 
 	log.Printf("[미팅/format_toggle] 완료 thread=%s sc=%s format=%s rendered_bytes=%d",
 		sess.ThreadID, scRow.ID, format, len(rendered))
+}
+
+// HandleFormatCopy는 정리본 메시지의 [복사] button 클릭 핸들러.
+//
+// 동작 (Codex review #12 P2 2건 + #14 P2 1건 반영):
+//   - 메시지 button row의 SuccessButton(active 토글)에서 현재 포맷 식별.
+//   - DB의 finalize_runs에서 (sc_id, format)으로 원본 full markdown 조회 — embed.Description은
+//     4090자에서 잘려 있을 수 있으므로 SSOT로 부적합.
+//   - 조회 성공 시 그 OutputMD를 .md 파일 첨부.
+//   - 조회 실패/없음 시 embed.Description fallback + 잘림 가능성 명시 안내.
+//   - 파일 첨부 방식 채택 이유:
+//     · Discord ephemeral content 한도 2000자 vs embed 한도 4090자 → 인라인 fenced code block은
+//       1984자에서 잘렸음. 파일 첨부는 10MB 한도라 사실상 무제한.
+//     · 정리본 markdown 안에 fenced code block(```) 이 있으면 outer ```markdown fence가 닫혀버려
+//       복사 깨졌음. 파일 첨부는 원본 그대로 보존.
+//
+// 호출 계약: 호출자(discord.go)가 이미 deferred ack 완료.
+func HandleFormatCopy(
+	ctx context.Context,
+	s *discordgo.Session,
+	i *discordgo.InteractionCreate,
+	sess *Session,
+	customID string,
+) {
+	sendError := func(msg string) {
+		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: msg,
+			Flags:   discordgo.MessageFlagsEphemeral,
+		})
+		if err != nil {
+			log.Printf("[미팅/format_copy] ERR followup 전송 실패 thread=%s: %v", sess.ThreadID, err)
+		}
+	}
+
+	// Codex review PR #14 2차 P2: placeholder 로딩 중 [복사] 클릭 시
+	// embed.Description이 "다시 만드는 중..." 텍스트라 그게 파일로 첨부되는 회귀 차단.
+	// FormatToggleInFlight=true면 즉시 거부 안내.
+	sess.NotesMu.Lock()
+	inFlight := sess.FormatToggleInFlight
+	sess.NotesMu.Unlock()
+	if inFlight {
+		logGuard("meeting/format_copy", "in_flight",
+			"포맷 토글 LLM 호출 진행 중 — 복사 거부 (placeholder 첨부 회귀 방지)",
+			lf("thread", sess.ThreadID))
+		sendError("포맷 변환이 진행 중입니다. 정리본 갱신이 끝난 뒤 다시 [복사]를 눌러주세요.")
+		return
+	}
+
+	if i.Message == nil || len(i.Message.Embeds) == 0 || i.Message.Embeds[0] == nil {
+		logGuard("meeting/format_copy", "no_embed",
+			"메시지에 embed가 없어 복사 대상 없음",
+			lf("thread", sess.ThreadID))
+		sendError("복사할 정리본 내용을 찾을 수 없습니다. 메시지를 다시 생성해주세요.")
+		return
+	}
+
+	// active 포맷 식별 — button row의 SuccessButton에서 추출.
+	// 식별 실패 시 embed.Description fallback (truncated 가능성 명시).
+	activeFormat, hasActiveFormat := activeFormatFromMessage(i.Message)
+	embedDesc := i.Message.Embeds[0].Description
+	if embedDesc == "" {
+		sendError("복사할 정리본 내용이 비어 있습니다.")
+		return
+	}
+
+	// DB 캐시에서 원본 full markdown 조회 시도.
+	// Codex review PR #14 3차 P2: customID의 sc_id suffix 우선 — 옛 정리본 메시지 [복사] 시
+	// 그 메시지의 정확한 sc를 조회 (GetLatest 사용 시 최신 sc의 markdown이 첨부되는 회귀 차단).
+	_, scIDFromBtn := parseToggleCustomID(customID)
+	var md string
+	var sourceLabel string
+	if hasActiveFormat && dbConn != nil {
+		var scRow db.SummarizedContent
+		var err error
+		if scIDFromBtn != "" {
+			scRow, err = dbConn.GetSummarizedContentByID(ctx, scIDFromBtn)
+		} else if sess.DBSessionID != "" {
+			// 옛 메시지 호환 — sc_id suffix 없으면 latest fallback.
+			scRow, err = dbConn.GetLatestSummarizedContent(ctx, sess.DBSessionID)
+		} else {
+			err = fmt.Errorf("no sc_id and no DBSessionID")
+		}
+		if err == nil {
+			run, qErr := dbConn.GetFinalizeRunByFormat(ctx, scRow.ID, formatToDBKind(activeFormat))
+			if qErr == nil && run != nil && run.OutputMD != "" {
+				md = run.OutputMD
+				sourceLabel = "DB 원본"
+				log.Printf("[미팅/format_copy] DB 원본 사용 thread=%s sc=%s format=%s runes=%d (scID source=%q)",
+					sess.ThreadID, scRow.ID, activeFormat, len([]rune(md)), scIDFromBtn)
+			}
+		}
+	}
+	// DB 조회 실패 시 embed.Description fallback.
+	if md == "" {
+		md = embedDesc
+		sourceLabel = "embed (잘림 가능)"
+		log.Printf("[미팅/format_copy] embed fallback 사용 thread=%s runes=%d (DB 조회 실패 또는 active 식별 실패)",
+			sess.ThreadID, len([]rune(md)))
+	}
+
+	// .md 파일 첨부 — 파일명 thread + timestamp로 고유.
+	totalRunes := len([]rune(md))
+	filename := fmt.Sprintf("meeting-summary-%s-%s.md",
+		sess.ThreadID, time.Now().Format("20060102-150405"))
+
+	noticePrefix := "정리본 markdown 파일을 첨부했습니다"
+	if sourceLabel == "embed (잘림 가능)" {
+		noticePrefix = "정리본 markdown 파일을 첨부했습니다 (embed 표시본 기준 — 4090자에서 잘렸을 수 있음)"
+	}
+	notice := fmt.Sprintf("%s (%d자).\n파일을 다운로드해 원본 그대로 복사하거나 다른 곳에 붙여넣으세요.",
+		noticePrefix, totalRunes)
+
+	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content: notice,
+		Files: []*discordgo.File{
+			{
+				Name:        filename,
+				ContentType: "text/markdown; charset=utf-8",
+				Reader:      strings.NewReader(md),
+			},
+		},
+		Flags: discordgo.MessageFlagsEphemeral,
+	})
+	if err != nil {
+		log.Printf("[미팅/format_copy] ERR file followup 전송 실패 thread=%s file=%s: %v",
+			sess.ThreadID, filename, err)
+		// 파일 첨부 실패 시 inline fallback — 안전한 plain text로 (fence 충돌 회피).
+		// 첫 1900자 잘라서 보냄. 사용자가 다시 button 누르도록 안내.
+		const maxFallback = 1900
+		runes := []rune(md)
+		body := md
+		if len(runes) > maxFallback {
+			body = string(runes[:maxFallback]) + "\n…(이하 잘림 — 파일 첨부 실패로 인라인 표시)"
+		}
+		sendError(fmt.Sprintf("파일 첨부에 실패해 inline으로 보냅니다 (%d자 중 일부).\n\n%s",
+			totalRunes, body))
+		return
+	}
+
+	log.Printf("[미팅/format_copy] 완료 thread=%s file=%s runes=%d",
+		sess.ThreadID, filename, totalRunes)
 }
 
 // buildSummarizedEmbed는 정리본 markdown을 Discord embed로 wrapping한다.

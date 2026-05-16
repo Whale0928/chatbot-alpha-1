@@ -305,6 +305,12 @@ const (
 	customIDFormatToggleFreeform       = "format_toggle_freeform"
 )
 
+// customIDFormatCopy — 정리본 메시지의 [복사] button.
+// 클릭 시 현재 embed.Description (활성 포맷 markdown)을 fenced code block으로 감싸
+// ephemeral followup으로 노출 → 사용자가 길게 눌러 / 드래그로 복사 가능.
+// 단일 button 1개로 활성 포맷 추적 불필요 (현 메시지 embed 내용 그대로 사용).
+const customIDFormatCopy = "format_copy"
+
 // customIDExternalAttach — Phase 3 chunk 3C: 외부 자료 첨부 명시 button.
 // 클릭 시 sess.PendingExternalPaste=true → 다음 1건 발화를 ExternalPaste source로 분류.
 // 거시 결정 F의 명시적 분류 부분 (자동 500자 임계와 짝).
