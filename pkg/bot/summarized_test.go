@@ -448,7 +448,9 @@ func TestFormatToggleComponents_ActiveHighlighted(t *testing.T) {
 	}
 }
 
-func TestFormatToggleLabel(t *testing.T) {
+// labelForFormat (discord.go에 정의)은 finalize 흐름과 toggle placeholder 모두에서 사용.
+// 두 곳에서 라벨이 어긋나지 않게 회귀 가드.
+func TestLabelForFormat(t *testing.T) {
 	cases := []struct {
 		in   llm.NoteFormat
 		want string
@@ -459,9 +461,9 @@ func TestFormatToggleLabel(t *testing.T) {
 		{llm.FormatFreeform, "자율"},
 	}
 	for _, c := range cases {
-		got := formatToggleLabel(c.in)
+		got := labelForFormat(c.in)
 		if got != c.want {
-			t.Errorf("formatToggleLabel(%v) = %q, want %q", c.in, got, c.want)
+			t.Errorf("labelForFormat(%v) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -865,3 +867,292 @@ func TestHandleFormatToggle_ParseFailure_NoPlaceholderEdit(t *testing.T) {
 		}
 	}
 }
+
+// ===== Copilot review PR #12 #3: HandleFormatCopy 단위 테스트 =====
+
+func TestHandleFormatCopy_NoEmbed_SendsErrorFollowup(t *testing.T) {
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID:   "app-copy-no-embed",
+			Token:   "token-copy-no-embed",
+			Message: &discordgo.Message{}, // embed 없음
+		},
+	}
+	sess := &Session{ThreadID: "thread-copy-no-embed"}
+
+	HandleFormatCopy(context.Background(), discordSession, interaction, sess)
+
+	// followup 1번만 (에러 안내).
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1 (error followup)", len(rt.calls))
+	}
+	if !strings.Contains(rt.calls[0].body, "찾을 수 없습니다") {
+		t.Fatalf("error followup missing message:\n%s", rt.calls[0].body)
+	}
+}
+
+func TestHandleFormatCopy_EmptyDescription_SendsErrorFollowup(t *testing.T) {
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID: "app-copy-empty-desc",
+			Token: "token-copy-empty-desc",
+			Message: &discordgo.Message{
+				Embeds: []*discordgo.MessageEmbed{{Description: ""}},
+			},
+		},
+	}
+	sess := &Session{ThreadID: "thread-copy-empty-desc"}
+
+	HandleFormatCopy(context.Background(), discordSession, interaction, sess)
+
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
+	}
+	if !strings.Contains(rt.calls[0].body, "비어 있습니다") {
+		t.Fatalf("empty-desc followup missing message:\n%s", rt.calls[0].body)
+	}
+}
+
+func TestHandleFormatCopy_AttachesMarkdownFile(t *testing.T) {
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	md := "## 이번 회의에서 합의한 결정\n- 첫 결정\n- 두 번째 결정\n\n## 후속 작업\n- 코드 ```snippet``` 포함도 안전\n"
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID: "app-copy-ok",
+			Token: "token-copy-ok",
+			Message: &discordgo.Message{
+				Embeds: []*discordgo.MessageEmbed{{Description: md}},
+			},
+		},
+	}
+	sess := &Session{ThreadID: "thread-copy-ok"}
+
+	HandleFormatCopy(context.Background(), discordSession, interaction, sess)
+
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1 (file followup)", len(rt.calls))
+	}
+	body := rt.calls[0].body
+	// 안내 메시지 + 파일 첨부 헤더 검증.
+	if !strings.Contains(body, "정리본 markdown 파일을 첨부했습니다") {
+		t.Errorf("notice text missing:\n%s", body)
+	}
+	// multipart/form-data 안에 .md 파일 + content-type 박혀야 함.
+	if !strings.Contains(body, "meeting-summary-thread-copy-ok") || !strings.Contains(body, ".md") {
+		t.Errorf("file attachment filename missing:\n%s", body)
+	}
+	if !strings.Contains(body, "text/markdown") {
+		t.Errorf("file content-type missing:\n%s", body)
+	}
+	// 원본 markdown 그대로 (fence 충돌 무관) 박혀 있어야 함.
+	if !strings.Contains(body, "코드 ```snippet``` 포함도 안전") {
+		t.Errorf("file body missing original markdown (fence preserved):\n%s", body)
+	}
+	// 인라인 fenced code block (```markdown) 폐기 검증.
+	if strings.Contains(body, "```markdown\n") {
+		t.Errorf("inline ```markdown fence shouldn't appear (file attachment only):\n%s", body)
+	}
+}
+
+// ===== Copilot review PR #13 #4: placeholder edit 실패 fallback 테스트 =====
+
+func TestHandleFormatToggle_PlaceholderEditFailure_StillProceedsToFinalEdit(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+
+	oldDBConn := dbConn
+	oldSummarizer := summarizer
+	t.Cleanup(func() {
+		dbConn = oldDBConn
+		summarizer = oldSummarizer
+	})
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_placeholder_fail",
+		ThreadID: "thread-placeholder-fail",
+		GuildID:  "guild-placeholder-fail",
+		OwnerID:  "owner-placeholder-fail",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	content := &llm.SummarizedContent{Decisions: []llm.Decision{{Title: "테스트 결정"}}}
+	raw, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID:          "sc_placeholder_fail",
+		SessionID:   "sess_placeholder_fail",
+		Content:     raw,
+		ExtractedAt: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent: %v", err)
+	}
+
+	summarizer = &formatToggleSummarizer{
+		outputs: map[llm.NoteFormat]string{llm.FormatDiscussion: "discussion final render"},
+	}
+
+	// 첫 PATCH (placeholder)는 500 에러, 두 번째 PATCH (final)는 200.
+	failFirstPATCH := &recordingRoundTripper{}
+	patchCount := 0
+	httpClient := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		failFirstPATCH.calls = append(failFirstPATCH.calls, recordedHTTPCall{method: r.Method, path: r.URL.Path})
+		if r.Method == http.MethodPatch {
+			patchCount++
+			if patchCount == 1 {
+				return &http.Response{
+					StatusCode: 500,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"message": "internal error"}`)),
+				}, nil
+			}
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+		}, nil
+	})}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = httpClient
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID: "app-placeholder-fail",
+			Token: "token-placeholder-fail",
+		},
+	}
+	sess := &Session{
+		ThreadID:    "thread-placeholder-fail",
+		DBSessionID: "sess_placeholder_fail",
+	}
+
+	HandleFormatToggle(ctx, discordSession, interaction, sess, customIDFormatToggleDiscussion)
+
+	// placeholder PATCH 실패에도 LLM 호출 + final PATCH 진행.
+	if patchCount < 2 {
+		t.Fatalf("PATCH count = %d, want >= 2 (placeholder failed but final must proceed)", patchCount)
+	}
+	// finalize_runs 캐시 저장됐는지 (LLM 호출 성공 후 persist) 검증.
+	var runs int
+	if err := d.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM finalize_runs WHERE summarized_content_id = ? AND format = ?",
+		"sc_placeholder_fail", string(db.FormatDiscussion),
+	).Scan(&runs); err != nil {
+		t.Fatalf("count finalize_runs: %v", err)
+	}
+	if runs != 1 {
+		t.Errorf("finalize_runs count = %d, want 1 (placeholder failure shouldn't block persist)", runs)
+	}
+}
+
+// ===== Copilot review PR #13 #3: 인플라이트 가드 회귀 테스트 =====
+
+func TestHandleFormatToggle_InFlightGuard_BlocksConcurrentCacheMiss(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+
+	oldDBConn := dbConn
+	oldSummarizer := summarizer
+	t.Cleanup(func() {
+		dbConn = oldDBConn
+		summarizer = oldSummarizer
+	})
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_inflight",
+		ThreadID: "thread-inflight",
+		GuildID:  "guild-inflight",
+		OwnerID:  "owner-inflight",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	content := &llm.SummarizedContent{Decisions: []llm.Decision{{Title: "테스트"}}}
+	raw, _ := json.Marshal(content)
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID:          "sc_inflight",
+		SessionID:   "sess_inflight",
+		Content:     raw,
+		ExtractedAt: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent: %v", err)
+	}
+
+	summ := &formatToggleSummarizer{
+		outputs: map[llm.NoteFormat]string{llm.FormatDiscussion: "discussion render"},
+	}
+	summarizer = summ
+
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID: "app-inflight",
+			Token: "token-inflight",
+		},
+	}
+	sess := &Session{
+		ThreadID:             "thread-inflight",
+		DBSessionID:          "sess_inflight",
+		FormatToggleInFlight: true, // 이미 다른 호출 진행 중 시뮬레이션
+	}
+
+	HandleFormatToggle(ctx, discordSession, interaction, sess, customIDFormatToggleDiscussion)
+
+	// LLM 호출 발생 X (인플라이트로 거부).
+	if summ.renderFormatCalls != 0 {
+		t.Errorf("RenderFormat calls = %d, want 0 (in-flight 거부)", summ.renderFormatCalls)
+	}
+	// followup ephemeral 1건 (안내 메시지) — 메시지 edit (PATCH) X.
+	for _, c := range rt.calls {
+		if c.method == http.MethodPatch {
+			t.Errorf("PATCH 발생 — in-flight 거부 시 메시지 안 건드려야 함:\n%s", c.body)
+		}
+	}
+	if len(rt.calls) != 1 {
+		t.Errorf("HTTP calls = %d, want 1 (ephemeral followup만)", len(rt.calls))
+	}
+	if len(rt.calls) > 0 && !strings.Contains(rt.calls[0].body, "이전 포맷 변환이 아직 진행 중") {
+		t.Errorf("in-flight followup message missing:\n%s", rt.calls[0].body)
+	}
+}
+
+// roundTripperFunc는 http.RoundTripper 인터페이스를 함수 리터럴로 만족하는 헬퍼.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

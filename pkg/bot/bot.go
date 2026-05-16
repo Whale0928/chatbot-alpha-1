@@ -129,6 +129,13 @@ type Session struct {
 	// 사용자가 [중간 요약] 버튼을 빠르게 두 번 누를 때 두 번째 클릭을 거부하는 가드.
 	InterimInFlight bool
 
+	// FormatToggleInFlight는 현재 cache miss 토글의 LLM 호출이 진행 중인지 표시 (NotesMu 보호).
+	// Copilot review (PR #13 #3): placeholder edit 후 button이 enabled 상태 그대로라
+	// 사용자가 LLM 호출 3-10초 동안 다른 포맷 button을 연속 클릭 시 중복 LLM 호출 가능.
+	// 첫 cache miss 호출이 끝날 때까지 다른 토글은 ephemeral followup으로 거부.
+	// cache hit은 즉시 응답이라 InFlight 무관 (set/unset 자체 안 함).
+	FormatToggleInFlight bool
+
 	// === Sticky 컨트롤 메시지 트래킹 (NotesMu 보호) ===
 	// 스티키 버튼 메시지의 Discord message ID. 갱신 시 delete 대상.
 	StickyMessageID string

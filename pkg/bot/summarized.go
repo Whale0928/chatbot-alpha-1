@@ -394,23 +394,6 @@ func formatFromToggleCustomID(id string) (llm.NoteFormat, bool) {
 	}
 }
 
-// formatToggleLabel은 NoteFormat을 사용자 가시 한국어 라벨로 변환 (placeholder UX 용).
-// formatToggleComponents의 button Label과 일치시켜야 함 (사용자가 button과 placeholder를 시각 매핑).
-func formatToggleLabel(f llm.NoteFormat) string {
-	switch f {
-	case llm.FormatDecisionStatus:
-		return "결정+진행"
-	case llm.FormatDiscussion:
-		return "논의"
-	case llm.FormatRoleBased:
-		return "역할별"
-	case llm.FormatFreeform:
-		return "자율"
-	default:
-		return f.String()
-	}
-}
-
 // formatToDBKind은 llm.NoteFormat을 db.FormatKind로 변환 (DB persist용).
 func formatToDBKind(f llm.NoteFormat) db.FormatKind {
 	switch f {
@@ -508,12 +491,34 @@ func HandleFormatToggle(
 			return
 		}
 
+		// Copilot review (PR #13 #3) P2: 인플라이트 가드.
+		// LLM 호출 3-10초 동안 사용자가 다른 토글 button 연속 클릭 시 중복 LLM 호출 가능.
+		// 첫 cache miss 호출이 끝날 때까지 다른 토글은 거부 (ephemeral followup).
+		// cache hit은 InFlight 무관 (이미 위 case에서 return).
+		sess.NotesMu.Lock()
+		if sess.FormatToggleInFlight {
+			sess.NotesMu.Unlock()
+			logGuard("meeting/format_toggle", "in_flight",
+				"이미 다른 포맷 cache miss LLM 호출 진행 중 — 중복 클릭 거부",
+				lf("thread", sess.ThreadID), lf("custom_id", customID))
+			sendFollowup("이전 포맷 변환이 아직 진행 중입니다. 잠시 기다린 뒤 다시 눌러주세요.")
+			return
+		}
+		sess.FormatToggleInFlight = true
+		sess.NotesMu.Unlock()
+		// 어떤 분기로 끝나든 InFlight 해제 — panic/return 무관.
+		defer func() {
+			sess.NotesMu.Lock()
+			sess.FormatToggleInFlight = false
+			sess.NotesMu.Unlock()
+		}()
+
 		// Option 2 UX — cache miss는 LLM 호출 3-10초 걸려서 사용자가 "버튼 눌렀는데 반응 없음"으로 체감.
 		// parse 성공 후 placeholder embed로 edit해서 시각 피드백 제공.
 		// active 토글 button은 새 포맷으로 미리 강조 → 어떤 포맷 로딩 중인지 명확.
 		placeholderEmbed := &discordgo.MessageEmbed{
 			Description: fmt.Sprintf("**%s** 포맷으로 정리본을 다시 만드는 중입니다…\n\n잠시만 기다려주세요. (보통 3~10초 소요)",
-				formatToggleLabel(format)),
+				labelForFormat(format)),
 		}
 		emptyContent := ""
 		placeholderEdit := &discordgo.WebhookEdit{
