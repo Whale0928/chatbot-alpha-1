@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -550,14 +551,15 @@ func HandleFormatToggle(
 
 // HandleFormatCopy는 정리본 메시지의 [복사] button 클릭 핸들러.
 //
-// 동작:
-//   - 현재 메시지 embed.Description (활성 포맷 markdown) 을 그대로
-//     ephemeral followup message에 fenced code block으로 감싸서 보냄.
-//   - Discord 모바일/데스크탑 모두 fenced code block 길게 누르기 / 드래그로 복사 가능.
+// 동작 (Codex review #12 P2 2건 반영):
+//   - 현재 메시지 embed.Description (활성 포맷 markdown) 을 .md 파일로 ephemeral followup 첨부.
+//   - 파일 첨부 방식 채택 이유:
+//     · Discord ephemeral message content 한도 2000자 vs embed 한도 4090자 → 인라인 fenced code block은
+//       1984자에서 잘렸음. 파일 첨부는 10MB 한도라 사실상 무제한.
+//     · 정리본 markdown 안에 fenced code block(```) 이 있으면 outer ```markdown fence가 닫혀버려
+//       복사 깨졌음. 파일 첨부는 원본 그대로 보존.
+//   - 사용자는 파일 다운로드 후 좋아하는 editor에서 복사/편집. 모바일도 미리보기 + 복사 지원.
 //   - 별도 active format 추적 불필요 — 메시지 embed가 SSOT.
-//
-// 4096자 한도 (embed.Description) → fenced code block fence 7자 + "markdown" 8자
-// = 약 4079자가 안전. 더 길면 잘라서 보냄 (정리본 자체가 4090 잘렸으면 추가 잘림 없음).
 //
 // 호출 계약: 호출자(discord.go)가 이미 deferred ack 완료.
 func HandleFormatCopy(
@@ -566,9 +568,9 @@ func HandleFormatCopy(
 	i *discordgo.InteractionCreate,
 	sess *Session,
 ) {
-	sendFollowup := func(content string) {
+	sendError := func(msg string) {
 		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Content: content,
+			Content: msg,
 			Flags:   discordgo.MessageFlagsEphemeral,
 		})
 		if err != nil {
@@ -580,44 +582,53 @@ func HandleFormatCopy(
 		logGuard("meeting/format_copy", "no_embed",
 			"메시지에 embed가 없어 복사 대상 없음",
 			lf("thread", sess.ThreadID))
-		sendFollowup("복사할 정리본 내용을 찾을 수 없습니다. 메시지를 다시 생성해주세요.")
+		sendError("복사할 정리본 내용을 찾을 수 없습니다. 메시지를 다시 생성해주세요.")
 		return
 	}
 
 	md := i.Message.Embeds[0].Description
 	if md == "" {
-		sendFollowup("복사할 정리본 내용이 비어 있습니다.")
+		sendError("복사할 정리본 내용이 비어 있습니다.")
 		return
 	}
 
-	// fenced code block 길이 안전 계산.
-	// "```markdown\n" (12자) + md + "\n```" (4자) = wrapper 16자.
-	// Discord ephemeral message content 한도 2000자.
-	const (
-		fenceOpen      = "```markdown\n"
-		fenceClose     = "\n```"
-		wrapperLen     = len(fenceOpen) + len(fenceClose) // 16
-		maxContentLen  = 2000
-		maxBodyRunes   = maxContentLen - wrapperLen       // 1984
-		truncateMarker = "\n…(이하 잘림 — 전체는 위 정리본 embed 참조)"
-	)
+	// .md 파일 첨부 — 파일명 thread + timestamp로 고유.
+	totalRunes := len([]rune(md))
+	filename := fmt.Sprintf("meeting-summary-%s-%s.md",
+		sess.ThreadID, time.Now().Format("20060102-150405"))
 
-	body := md
-	runes := []rune(body)
-	if len(runes) > maxBodyRunes {
-		// truncateMarker도 안전 영역 안에 들어가도록 추가 여유 확보.
-		cutAt := maxBodyRunes - len([]rune(truncateMarker))
-		if cutAt < 0 {
-			cutAt = 0
+	notice := fmt.Sprintf("정리본 markdown 파일을 첨부했습니다 (%d자).\n파일을 다운로드해 원본 그대로 복사하거나 다른 곳에 붙여넣으세요.",
+		totalRunes)
+
+	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content: notice,
+		Files: []*discordgo.File{
+			{
+				Name:        filename,
+				ContentType: "text/markdown; charset=utf-8",
+				Reader:      strings.NewReader(md),
+			},
+		},
+		Flags: discordgo.MessageFlagsEphemeral,
+	})
+	if err != nil {
+		log.Printf("[미팅/format_copy] ERR file followup 전송 실패 thread=%s file=%s: %v",
+			sess.ThreadID, filename, err)
+		// 파일 첨부 실패 시 inline fallback — 안전한 plain text로 (fence 충돌 회피).
+		// 첫 1900자 잘라서 보냄. 사용자가 다시 button 누르도록 안내.
+		const maxFallback = 1900
+		runes := []rune(md)
+		body := md
+		if len(runes) > maxFallback {
+			body = string(runes[:maxFallback]) + "\n…(이하 잘림 — 파일 첨부 실패로 인라인 표시)"
 		}
-		body = string(runes[:cutAt]) + truncateMarker
-		log.Printf("[미팅/format_copy] WARN content %d자 → %d자로 잘림 (Discord 2000자 한도) thread=%s",
-			len(runes), len([]rune(body)), sess.ThreadID)
+		sendError(fmt.Sprintf("파일 첨부에 실패해 inline으로 보냅니다 (%d자 중 일부).\n\n%s",
+			totalRunes, body))
+		return
 	}
 
-	content := fenceOpen + body + fenceClose
-	sendFollowup(content)
-	log.Printf("[미팅/format_copy] 완료 thread=%s body_bytes=%d", sess.ThreadID, len(body))
+	log.Printf("[미팅/format_copy] 완료 thread=%s file=%s runes=%d",
+		sess.ThreadID, filename, totalRunes)
 }
 
 // buildSummarizedEmbed는 정리본 markdown을 Discord embed로 wrapping한다.
