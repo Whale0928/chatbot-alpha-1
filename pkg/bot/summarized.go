@@ -280,7 +280,7 @@ func FinalizeSummarized(
 	}
 	if _, err := msg.ChannelMessageSendComplex(sess.ThreadID, &discordgo.MessageSend{
 		Embeds:     []*discordgo.MessageEmbed{embed},
-		Components: formatToggleComponents(defaultFormat),
+		Components: formatToggleComponents(defaultFormat, scID),
 	}); err != nil {
 		log.Printf("[미팅/finalize_summarized] ERR 정리본+토글 전송 실패: %v", err)
 		return true
@@ -357,30 +357,54 @@ func renderSummarizedByFormat(
 //
 // 활성 포맷 button은 SuccessButton (강조), 나머지는 SecondaryButton.
 // [복사] button은 PrimaryButton (시각 구분, 항상 active 무관).
-func formatToggleComponents(active llm.NoteFormat) []discordgo.MessageComponent {
+//
+// scID는 정리본 ID. 빈 문자열이 아니면 모든 button customID에 ":scID" suffix로 붙여
+// 옛 메시지 클릭 시에도 정확한 정리본 행을 조회 가능하게 한다 (Codex review PR #14 2-3차 P2).
+// 옛 메시지 호환을 위해 빈 문자열 호출도 허용 (suffix 없는 customID).
+//
+// CustomID 형식: "{base}:scID" (예: format_copy:sc_1730000000000000_1).
+// Discord customID 100자 한도 — base + sc_id 약 40-50자라 적합.
+func formatToggleComponents(active llm.NoteFormat, scID string) []discordgo.MessageComponent {
 	style := func(f llm.NoteFormat) discordgo.ButtonStyle {
 		if f == active {
 			return discordgo.SuccessButton
 		}
 		return discordgo.SecondaryButton
 	}
+	suffix := ""
+	if scID != "" {
+		suffix = ":" + scID
+	}
 	return []discordgo.MessageComponent{
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
-				discordgo.Button{Label: "결정+진행", Style: style(llm.FormatDecisionStatus), CustomID: customIDFormatToggleDecisionStatus},
-				discordgo.Button{Label: "논의", Style: style(llm.FormatDiscussion), CustomID: customIDFormatToggleDiscussion},
-				discordgo.Button{Label: "역할별", Style: style(llm.FormatRoleBased), CustomID: customIDFormatToggleRoleBased},
-				discordgo.Button{Label: "자율", Style: style(llm.FormatFreeform), CustomID: customIDFormatToggleFreeform},
-				discordgo.Button{Label: "복사", Style: discordgo.PrimaryButton, CustomID: customIDFormatCopy},
+				discordgo.Button{Label: "결정+진행", Style: style(llm.FormatDecisionStatus), CustomID: customIDFormatToggleDecisionStatus + suffix},
+				discordgo.Button{Label: "논의", Style: style(llm.FormatDiscussion), CustomID: customIDFormatToggleDiscussion + suffix},
+				discordgo.Button{Label: "역할별", Style: style(llm.FormatRoleBased), CustomID: customIDFormatToggleRoleBased + suffix},
+				discordgo.Button{Label: "자율", Style: style(llm.FormatFreeform), CustomID: customIDFormatToggleFreeform + suffix},
+				discordgo.Button{Label: "복사", Style: discordgo.PrimaryButton, CustomID: customIDFormatCopy + suffix},
 			},
 		},
 	}
 }
 
+// parseToggleCustomID는 button customID에서 (base, scID) 추출.
+// 옛 메시지(suffix 없음)는 (customID, "") 반환.
+// 형식: "{base}:scID" 또는 "{base}".
+func parseToggleCustomID(customID string) (base, scID string) {
+	idx := strings.Index(customID, ":")
+	if idx < 0 {
+		return customID, ""
+	}
+	return customID[:idx], customID[idx+1:]
+}
+
 // formatFromToggleCustomID는 토글 button custom_id를 NoteFormat으로 변환한다.
 // formatFromCustomID(legacy finalize button)와 별개 — toggle은 다른 customID 네임스페이스.
+// customID에 ":sc_id" suffix가 있으면 base 부분만 비교 (parseToggleCustomID로 분리).
 func formatFromToggleCustomID(id string) (llm.NoteFormat, bool) {
-	switch id {
+	base, _ := parseToggleCustomID(id)
+	switch base {
 	case customIDFormatToggleDecisionStatus:
 		return llm.FormatDecisionStatus, true
 	case customIDFormatToggleDiscussion:
@@ -496,9 +520,23 @@ func HandleFormatToggle(
 		return
 	}
 
-	scRow, err := dbConn.GetLatestSummarizedContent(ctx, sess.DBSessionID)
+	// customID의 sc_id suffix 우선 — 옛 정리본 메시지 토글 시 그 메시지의 sc를 조회.
+	// 없으면 (옛 메시지 호환) GetLatestSummarizedContent fallback.
+	_, scIDFromBtn := parseToggleCustomID(customID)
+	var scRow db.SummarizedContent
+	var err error
+	if scIDFromBtn != "" {
+		scRow, err = dbConn.GetSummarizedContentByID(ctx, scIDFromBtn)
+		if err != nil {
+			log.Printf("[미팅/format_toggle] WARN GetSummarizedContentByID failed sc=%s: %v — fallback to latest",
+				scIDFromBtn, err)
+			scRow, err = dbConn.GetLatestSummarizedContent(ctx, sess.DBSessionID)
+		}
+	} else {
+		scRow, err = dbConn.GetLatestSummarizedContent(ctx, sess.DBSessionID)
+	}
 	if err != nil {
-		log.Printf("[미팅/format_toggle] ERR GetLatestSummarizedContent thread=%s: %v", sess.ThreadID, err)
+		log.Printf("[미팅/format_toggle] ERR sc lookup thread=%s: %v", sess.ThreadID, err)
 		sendFollowup("정리본 데이터를 찾을 수 없습니다. 다시 [정리본 통합·토글] 버튼을 눌러주세요.")
 		return
 	}
@@ -557,7 +595,7 @@ func HandleFormatToggle(
 		placeholderEdit := &discordgo.WebhookEdit{
 			Content:    &emptyContent,
 			Embeds:     &[]*discordgo.MessageEmbed{placeholderEmbed},
-			Components: ptrComponents(formatToggleComponents(format)),
+			Components: ptrComponents(formatToggleComponents(format, scRow.ID)),
 		}
 		if _, err := s.InteractionResponseEdit(i.Interaction, placeholderEdit); err != nil {
 			// placeholder 실패는 치명 X — 로그만 남기고 LLM 호출 진행. 최종 edit에서 다시 시도.
@@ -612,7 +650,7 @@ func HandleFormatToggle(
 	editMsg := &discordgo.WebhookEdit{
 		Content:    &emptyContent,
 		Embeds:     &[]*discordgo.MessageEmbed{embed},
-		Components: ptrComponents(formatToggleComponents(format)),
+		Components: ptrComponents(formatToggleComponents(format, scRow.ID)),
 	}
 	if _, err := s.InteractionResponseEdit(i.Interaction, editMsg); err != nil {
 		log.Printf("[미팅/format_toggle] ERR InteractionResponseEdit thread=%s: %v", sess.ThreadID, err)
@@ -645,6 +683,7 @@ func HandleFormatCopy(
 	s *discordgo.Session,
 	i *discordgo.InteractionCreate,
 	sess *Session,
+	customID string,
 ) {
 	sendError := func(msg string) {
 		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
@@ -688,17 +727,29 @@ func HandleFormatCopy(
 	}
 
 	// DB 캐시에서 원본 full markdown 조회 시도.
+	// Codex review PR #14 3차 P2: customID의 sc_id suffix 우선 — 옛 정리본 메시지 [복사] 시
+	// 그 메시지의 정확한 sc를 조회 (GetLatest 사용 시 최신 sc의 markdown이 첨부되는 회귀 차단).
+	_, scIDFromBtn := parseToggleCustomID(customID)
 	var md string
 	var sourceLabel string
-	if hasActiveFormat && dbConn != nil && sess.DBSessionID != "" {
-		scRow, err := dbConn.GetLatestSummarizedContent(ctx, sess.DBSessionID)
+	if hasActiveFormat && dbConn != nil {
+		var scRow db.SummarizedContent
+		var err error
+		if scIDFromBtn != "" {
+			scRow, err = dbConn.GetSummarizedContentByID(ctx, scIDFromBtn)
+		} else if sess.DBSessionID != "" {
+			// 옛 메시지 호환 — sc_id suffix 없으면 latest fallback.
+			scRow, err = dbConn.GetLatestSummarizedContent(ctx, sess.DBSessionID)
+		} else {
+			err = fmt.Errorf("no sc_id and no DBSessionID")
+		}
 		if err == nil {
 			run, qErr := dbConn.GetFinalizeRunByFormat(ctx, scRow.ID, formatToDBKind(activeFormat))
 			if qErr == nil && run != nil && run.OutputMD != "" {
 				md = run.OutputMD
 				sourceLabel = "DB 원본"
-				log.Printf("[미팅/format_copy] DB 원본 사용 thread=%s sc=%s format=%s runes=%d",
-					sess.ThreadID, scRow.ID, activeFormat, len([]rune(md)))
+				log.Printf("[미팅/format_copy] DB 원본 사용 thread=%s sc=%s format=%s runes=%d (scID source=%q)",
+					sess.ThreadID, scRow.ID, activeFormat, len([]rune(md)), scIDFromBtn)
 			}
 		}
 	}

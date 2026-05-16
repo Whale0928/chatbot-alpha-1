@@ -53,6 +53,33 @@ func (d *DB) GetLatestSummarizedContent(ctx context.Context, sessionID string) (
 	return c, nil
 }
 
+// GetSummarizedContentByID는 정리본 ID로 정확한 행을 조회한다.
+// HandleFormatCopy가 button customID에 박힌 sc_id로 옛 정리본 메시지의
+// 정확한 markdown을 가져올 때 사용 — GetLatest는 다중 정리본 세션에서
+// 옛 메시지를 클릭해도 최신 sc를 반환하는 회귀 차단용.
+func (d *DB) GetSummarizedContentByID(ctx context.Context, id string) (SummarizedContent, error) {
+	var (
+		c           SummarizedContent
+		content     string
+		extractedAt int64
+	)
+	err := d.QueryRowContext(ctx,
+		`SELECT id, session_id, content, extracted_at
+		 FROM summarized_contents
+		 WHERE id = ?`,
+		id,
+	).Scan(&c.ID, &c.SessionID, &content, &extractedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SummarizedContent{}, ErrNotFound
+	}
+	if err != nil {
+		return SummarizedContent{}, fmt.Errorf("db: get summarized by id %q: %w", id, err)
+	}
+	c.Content = []byte(content)
+	c.ExtractedAt = time.Unix(extractedAt, 0)
+	return c, nil
+}
+
 // =====================================================================
 // FinalizeRun repository — 같은 SummarizedContent의 N회 포맷 변환 이력
 // =====================================================================

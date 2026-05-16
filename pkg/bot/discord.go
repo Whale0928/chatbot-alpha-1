@@ -182,6 +182,47 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
+	// === Phase 2 chunk 3c — 정리본 메시지의 4 포맷 토글 + [복사] button (prefix 매칭) ===
+	// Codex review PR #14 P2: customID에 ":sc_id" suffix가 박혀 있어 prefix 매칭으로 dispatch.
+	// 옛 메시지(suffix 없음)는 base customID 그대로 매칭.
+	//
+	// 형식:
+	//   format_toggle_decision_status[:sc_xxx]
+	//   format_toggle_discussion[:sc_xxx]
+	//   format_toggle_role_based[:sc_xxx]
+	//   format_toggle_freeform[:sc_xxx]
+	//   format_copy[:sc_xxx]
+	if base, _ := parseToggleCustomID(data.CustomID); base == customIDFormatToggleDecisionStatus ||
+		base == customIDFormatToggleDiscussion ||
+		base == customIDFormatToggleRoleBased ||
+		base == customIDFormatToggleFreeform {
+		log.Printf("[미팅/format_toggle] 클릭 thread=%s customID=%s by=%s", sess.ThreadID, data.CustomID, interactionCallerUsername(i))
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		}); err != nil {
+			log.Printf("[미팅/format_toggle] ERR ack 실패: %v", err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		HandleFormatToggle(ctx, s, i, sess, data.CustomID)
+		return
+	}
+	if base, _ := parseToggleCustomID(data.CustomID); base == customIDFormatCopy {
+		log.Printf("[미팅/format_copy] 클릭 thread=%s customID=%s by=%s", sess.ThreadID, data.CustomID, interactionCallerUsername(i))
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
+		}); err != nil {
+			log.Printf("[미팅/format_copy] ERR ack 실패: %v", err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		HandleFormatCopy(ctx, s, i, sess, data.CustomID)
+		return
+	}
+
 	// 주간 첫 분석 흐름의 라우팅. weekly.go의 핸들러에 위임.
 	//
 	// D1/D2 폐기 라우팅 (UX 재설계 2026-05):
@@ -364,41 +405,6 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		HandleSessionEnd(ctx, s, sess)
-
-	// === Phase 2 chunk 3c — 정리본 메시지의 4 포맷 토글 button ===
-	// DB에서 SummarizedContent 조회 → 새 포맷 렌더 → 메시지 edit. LLM 재호출 없음.
-	case customIDFormatToggleDecisionStatus,
-		customIDFormatToggleDiscussion,
-		customIDFormatToggleRoleBased,
-		customIDFormatToggleFreeform:
-		log.Printf("[미팅/format_toggle] 클릭 thread=%s customID=%s by=%s", sess.ThreadID, data.CustomID, interactionCallerUsername(i))
-		// 즉시 ack (defer 응답) — 토글은 UX상 매우 빠름 (DB read + render 순수)
-		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseDeferredMessageUpdate,
-		}); err != nil {
-			log.Printf("[미팅/format_toggle] ERR ack 실패: %v", err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer cancel()
-		HandleFormatToggle(ctx, s, i, sess, data.CustomID)
-
-	// === Phase 2 chunk 3c-2 — 정리본 메시지의 [복사] button ===
-	// 현재 embed.Description (활성 포맷 markdown) 을 fenced code block로 ephemeral followup.
-	// 메시지 edit 없음 — 원본 정리본 그대로 유지.
-	case customIDFormatCopy:
-		log.Printf("[미팅/format_copy] 클릭 thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
-		// Deferred ephemeral ack — 복사는 메시지 edit 아니라 followup이므로 DeferredChannelMessageWithSource + ephemeral.
-		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
-		}); err != nil {
-			log.Printf("[미팅/format_copy] ERR ack 실패: %v", err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		HandleFormatCopy(ctx, s, i, sess)
 
 	// === Phase 2 chunk 3b — [정리본 통합·토글] 버튼 → SummarizedContent 1회 추출 ===
 	// LLM 1회 호출 후 default(decision_status)로 렌더 + 4 포맷 토글 button row 첨부.

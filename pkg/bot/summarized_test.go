@@ -414,7 +414,7 @@ func TestFinalizeSummarized_RenderFormatFailureDoesNotPersistFallbackRun(t *test
 // =====================================================================
 
 func TestFormatToggleComponents_ActiveHighlighted(t *testing.T) {
-	comps := formatToggleComponents(llm.FormatRoleBased)
+	comps := formatToggleComponents(llm.FormatRoleBased, "")
 	row, ok := comps[0].(discordgo.ActionsRow)
 	if !ok {
 		t.Fatalf("expected ActionsRow, got %T", comps[0])
@@ -543,14 +543,15 @@ func TestFormatToggleDiscordTimeoutIs90Seconds(t *testing.T) {
 		t.Fatalf("ReadFile discord.go: %v", err)
 	}
 	src := string(raw)
-	start := strings.Index(src, "case customIDFormatToggleDecisionStatus,")
+	// PR #14: switch case 폐기, prefix 매칭 if 블록으로 이동.
+	start := strings.Index(src, "base == customIDFormatToggleDecisionStatus ||")
 	if start < 0 {
-		t.Fatal("format toggle case not found")
+		t.Fatal("format toggle prefix dispatch not found")
 	}
 	rest := src[start:]
-	end := strings.Index(rest, "case customIDFinalizeSummarized:")
+	end := strings.Index(rest, "HandleFormatToggle(ctx, s, i, sess, data.CustomID)")
 	if end < 0 {
-		t.Fatal("finalize summarized case not found after format toggle case")
+		t.Fatal("HandleFormatToggle call not found after toggle dispatch")
 	}
 	block := rest[:end]
 	if !strings.Contains(block, "context.WithTimeout(context.Background(), 90*time.Second)") {
@@ -887,7 +888,7 @@ func TestHandleFormatCopy_NoEmbed_SendsErrorFollowup(t *testing.T) {
 	}
 	sess := &Session{ThreadID: "thread-copy-no-embed"}
 
-	HandleFormatCopy(context.Background(), discordSession, interaction, sess)
+	HandleFormatCopy(context.Background(), discordSession, interaction, sess, customIDFormatCopy)
 
 	// followup 1번만 (에러 안내).
 	if len(rt.calls) != 1 {
@@ -917,7 +918,7 @@ func TestHandleFormatCopy_EmptyDescription_SendsErrorFollowup(t *testing.T) {
 	}
 	sess := &Session{ThreadID: "thread-copy-empty-desc"}
 
-	HandleFormatCopy(context.Background(), discordSession, interaction, sess)
+	HandleFormatCopy(context.Background(), discordSession, interaction, sess, customIDFormatCopy)
 
 	if len(rt.calls) != 1 {
 		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
@@ -947,7 +948,7 @@ func TestHandleFormatCopy_AttachesMarkdownFile(t *testing.T) {
 	}
 	sess := &Session{ThreadID: "thread-copy-ok"}
 
-	HandleFormatCopy(context.Background(), discordSession, interaction, sess)
+	HandleFormatCopy(context.Background(), discordSession, interaction, sess, customIDFormatCopy)
 
 	if len(rt.calls) != 1 {
 		t.Fatalf("HTTP calls = %d, want 1 (file followup)", len(rt.calls))
@@ -1229,7 +1230,7 @@ func TestHandleFormatCopy_UsesDBCachedMarkdown_NotTruncatedEmbed(t *testing.T) {
 	}
 	sess := &Session{ThreadID: "thread-copy-db", DBSessionID: "sess_copy_db"}
 
-	HandleFormatCopy(ctx, discordSession, interaction, sess)
+	HandleFormatCopy(ctx, discordSession, interaction, sess, customIDFormatCopy)
 
 	if len(rt.calls) != 1 {
 		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
@@ -1295,7 +1296,7 @@ func TestHandleFormatCopy_FallsBackToEmbed_WhenDBMiss(t *testing.T) {
 	}
 	sess := &Session{ThreadID: "thread-copy-dbmiss", DBSessionID: "sess_copy_dbmiss"}
 
-	HandleFormatCopy(ctx, discordSession, interaction, sess)
+	HandleFormatCopy(ctx, discordSession, interaction, sess, customIDFormatCopy)
 
 	if len(rt.calls) != 1 {
 		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
@@ -1398,7 +1399,7 @@ func TestHandleFormatCopy_InFlight_RejectsCopy(t *testing.T) {
 		FormatToggleInFlight: true, // 다른 cache miss LLM 호출 진행 중
 	}
 
-	HandleFormatCopy(context.Background(), discordSession, interaction, sess)
+	HandleFormatCopy(context.Background(), discordSession, interaction, sess, customIDFormatCopy)
 
 	if len(rt.calls) != 1 {
 		t.Fatalf("HTTP calls = %d, want 1 (ephemeral reject followup만)", len(rt.calls))
@@ -1410,5 +1411,248 @@ func TestHandleFormatCopy_InFlight_RejectsCopy(t *testing.T) {
 	// "다시 만드는 중" placeholder가 파일로 첨부되면 안 됨.
 	if strings.Contains(body, `filename="meeting-summary`) {
 		t.Errorf("placeholder text가 파일로 첨부됨 (회귀):\n%s", body[:min(500, len(body))])
+	}
+}
+
+// Codex review PR #14 3차 P2: button customID의 sc_id suffix로 옛 메시지 정확 lookup.
+func TestParseToggleCustomID(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantBase string
+		wantSCID string
+	}{
+		{"format_copy", "format_copy", ""},
+		{"format_copy:sc_123_4", "format_copy", "sc_123_4"},
+		{"format_toggle_decision_status", "format_toggle_decision_status", ""},
+		{"format_toggle_discussion:sc_abc", "format_toggle_discussion", "sc_abc"},
+		{"", "", ""},
+	}
+	for _, c := range cases {
+		base, scID := parseToggleCustomID(c.in)
+		if base != c.wantBase || scID != c.wantSCID {
+			t.Errorf("parseToggleCustomID(%q) = (%q, %q), want (%q, %q)",
+				c.in, base, scID, c.wantBase, c.wantSCID)
+		}
+	}
+}
+
+func TestFormatToggleComponents_WithSCID_BindsSuffix(t *testing.T) {
+	comps := formatToggleComponents(llm.FormatDiscussion, "sc_xyz_7")
+	row := comps[0].(discordgo.ActionsRow)
+	if len(row.Components) != 5 {
+		t.Fatalf("want 5 buttons, got %d", len(row.Components))
+	}
+	wantSuffix := ":sc_xyz_7"
+	for _, c := range row.Components {
+		btn := c.(discordgo.Button)
+		if !strings.HasSuffix(btn.CustomID, wantSuffix) {
+			t.Errorf("button %q missing suffix %q", btn.CustomID, wantSuffix)
+		}
+	}
+}
+
+func TestFormatToggleComponents_WithoutSCID_NoSuffix(t *testing.T) {
+	comps := formatToggleComponents(llm.FormatDiscussion, "")
+	row := comps[0].(discordgo.ActionsRow)
+	for _, c := range row.Components {
+		btn := c.(discordgo.Button)
+		if strings.Contains(btn.CustomID, ":") {
+			t.Errorf("empty scID인데 suffix가 박힘: %q", btn.CustomID)
+		}
+	}
+}
+
+// 옛 메시지(sc_id suffix 없음) 토글 시 GetLatestSummarizedContent fallback 동작.
+func TestHandleFormatToggle_LegacyCustomID_FallsBackToLatest(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+	oldDBConn := dbConn
+	oldSummarizer := summarizer
+	t.Cleanup(func() { dbConn = oldDBConn; summarizer = oldSummarizer })
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID: "sess_legacy", ThreadID: "thread-legacy", GuildID: "g", OwnerID: "o",
+		OpenedAt: time.Unix(1700000000, 0), Status: db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID: "sc_latest", SessionID: "sess_legacy", Content: []byte(`{}`),
+		ExtractedAt: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent: %v", err)
+	}
+	if err := d.InsertFinalizeRun(ctx, db.FinalizeRun{
+		ID: "fr_legacy", SummarizedContentID: "sc_latest",
+		Format: db.FormatDiscussion, OutputMD: "## latest", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("InsertFinalizeRun: %v", err)
+	}
+
+	summarizer = &formatToggleSummarizer{}
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{AppID: "a", Token: "t"},
+	}
+	sess := &Session{ThreadID: "thread-legacy", DBSessionID: "sess_legacy"}
+
+	// 옛 customID (suffix 없음) → GetLatest fallback.
+	HandleFormatToggle(ctx, discordSession, interaction, sess, customIDFormatToggleDiscussion)
+
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
+	}
+	if !strings.Contains(rt.calls[0].body, "## latest") {
+		t.Errorf("final edit body missing latest cache:\n%s", rt.calls[0].body[:min(500, len(rt.calls[0].body))])
+	}
+}
+
+// sc_id suffix가 있으면 그 sc의 markdown 사용 (GetLatest와 다른 sc 케이스).
+func TestHandleFormatToggle_SCIDSuffix_UsesExactRow(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+	oldDBConn := dbConn
+	oldSummarizer := summarizer
+	t.Cleanup(func() { dbConn = oldDBConn; summarizer = oldSummarizer })
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID: "sess_multi", ThreadID: "thread-multi", GuildID: "g", OwnerID: "o",
+		OpenedAt: time.Unix(1700000000, 0), Status: db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	// 옛 sc + 새 sc 둘 다 같은 세션에.
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID: "sc_old", SessionID: "sess_multi", Content: []byte(`{}`),
+		ExtractedAt: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent old: %v", err)
+	}
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID: "sc_new", SessionID: "sess_multi", Content: []byte(`{}`),
+		ExtractedAt: time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent new: %v", err)
+	}
+	if err := d.InsertFinalizeRun(ctx, db.FinalizeRun{
+		ID: "fr_old", SummarizedContentID: "sc_old",
+		Format: db.FormatDiscussion, OutputMD: "## old summary", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("InsertFinalizeRun old: %v", err)
+	}
+	if err := d.InsertFinalizeRun(ctx, db.FinalizeRun{
+		ID: "fr_new", SummarizedContentID: "sc_new",
+		Format: db.FormatDiscussion, OutputMD: "## new summary", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("InsertFinalizeRun new: %v", err)
+	}
+
+	summarizer = &formatToggleSummarizer{}
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{AppID: "a", Token: "t"},
+	}
+	sess := &Session{ThreadID: "thread-multi", DBSessionID: "sess_multi"}
+
+	// 옛 메시지 토글 (sc_id=sc_old suffix) → "## old summary" 나와야 함 (GetLatest는 sc_new인데 무시).
+	HandleFormatToggle(ctx, discordSession, interaction, sess, customIDFormatToggleDiscussion+":sc_old")
+
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
+	}
+	if !strings.Contains(rt.calls[0].body, "old summary") {
+		t.Errorf("sc_old의 markdown 미사용 — sc_id binding 회귀:\n%s", rt.calls[0].body[:min(500, len(rt.calls[0].body))])
+	}
+	if strings.Contains(rt.calls[0].body, "new summary") {
+		t.Errorf("sc_new의 markdown이 잘못 사용됨:\n%s", rt.calls[0].body[:min(500, len(rt.calls[0].body))])
+	}
+}
+
+// HandleFormatCopy도 sc_id suffix로 정확한 sc 조회.
+func TestHandleFormatCopy_SCIDSuffix_UsesExactRow(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+	oldDBConn := dbConn
+	t.Cleanup(func() { dbConn = oldDBConn })
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID: "sess_copy_multi", ThreadID: "thread-copy-multi", GuildID: "g", OwnerID: "o",
+		OpenedAt: time.Unix(1700000000, 0), Status: db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID: "sc_old_copy", SessionID: "sess_copy_multi", Content: []byte(`{}`),
+		ExtractedAt: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent: %v", err)
+	}
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID: "sc_new_copy", SessionID: "sess_copy_multi", Content: []byte(`{}`),
+		ExtractedAt: time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent new: %v", err)
+	}
+	if err := d.InsertFinalizeRun(ctx, db.FinalizeRun{
+		ID: "fr_old_copy", SummarizedContentID: "sc_old_copy",
+		Format: db.FormatDecisionStatus, OutputMD: "OLD MARKDOWN", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("InsertFinalizeRun: %v", err)
+	}
+	if err := d.InsertFinalizeRun(ctx, db.FinalizeRun{
+		ID: "fr_new_copy", SummarizedContentID: "sc_new_copy",
+		Format: db.FormatDecisionStatus, OutputMD: "NEW MARKDOWN", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("InsertFinalizeRun new: %v", err)
+	}
+
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	// 옛 메시지의 [복사] 시뮬레이션 — embed는 "OLD..." 보이고, customID에는 sc_old_copy.
+	msg := &discordgo.Message{
+		Embeds: []*discordgo.MessageEmbed{{Description: "OLD MARKDOWN (embed)"}},
+		Components: []discordgo.MessageComponent{
+			&discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+				&discordgo.Button{Style: discordgo.SuccessButton, CustomID: customIDFormatToggleDecisionStatus + ":sc_old_copy"},
+			}},
+		},
+	}
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{AppID: "a", Token: "t", Message: msg},
+	}
+	sess := &Session{ThreadID: "thread-copy-multi", DBSessionID: "sess_copy_multi"}
+
+	// customID에 sc_old_copy suffix → "OLD MARKDOWN" 사용해야 함.
+	HandleFormatCopy(ctx, discordSession, interaction, sess, customIDFormatCopy+":sc_old_copy")
+
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
+	}
+	body := rt.calls[0].body
+	if !strings.Contains(body, "OLD MARKDOWN") {
+		t.Errorf("sc_old_copy markdown 미사용 — sc_id binding 회귀:\n%s", body[:min(500, len(body))])
+	}
+	if strings.Contains(body, "NEW MARKDOWN") {
+		t.Errorf("최신 sc_new_copy markdown 잘못 사용:\n%s", body[:min(500, len(body))])
 	}
 }
