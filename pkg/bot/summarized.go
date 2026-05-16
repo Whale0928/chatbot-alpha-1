@@ -394,6 +394,39 @@ func formatFromToggleCustomID(id string) (llm.NoteFormat, bool) {
 	}
 }
 
+// activeFormatFromMessage는 정리본 메시지 button row에서 SuccessButton(active 토글) 의
+// customID를 찾아 현재 활성 포맷을 식별한다. 식별 실패 시 (false) 반환.
+//
+// 사용: HandleFormatCopy가 embed.Description(잘릴 수 있음) 대신 DB의 full markdown을
+// 조회하기 위해 활성 포맷을 알아야 한다.
+//
+// 메시지 구조: ActionsRow [Button×4(토글) + Button×1(복사)]. SuccessButton 1개는 active 토글.
+// 복사 button은 PrimaryButton이라 매치 X. 토글 customID에 매칭되지 않는 button은 무시.
+func activeFormatFromMessage(msg *discordgo.Message) (llm.NoteFormat, bool) {
+	if msg == nil {
+		return 0, false
+	}
+	for _, comp := range msg.Components {
+		row, ok := comp.(*discordgo.ActionsRow)
+		if !ok {
+			continue
+		}
+		for _, sub := range row.Components {
+			btn, ok := sub.(*discordgo.Button)
+			if !ok {
+				continue
+			}
+			if btn.Style != discordgo.SuccessButton {
+				continue
+			}
+			if f, ok := formatFromToggleCustomID(btn.CustomID); ok {
+				return f, true
+			}
+		}
+	}
+	return 0, false
+}
+
 // formatToDBKind은 llm.NoteFormat을 db.FormatKind로 변환 (DB persist용).
 func formatToDBKind(f llm.NoteFormat) db.FormatKind {
 	switch f {
@@ -594,15 +627,17 @@ func HandleFormatToggle(
 
 // HandleFormatCopy는 정리본 메시지의 [복사] button 클릭 핸들러.
 //
-// 동작 (Codex review #12 P2 2건 반영):
-//   - 현재 메시지 embed.Description (활성 포맷 markdown) 을 .md 파일로 ephemeral followup 첨부.
+// 동작 (Codex review #12 P2 2건 + #14 P2 1건 반영):
+//   - 메시지 button row의 SuccessButton(active 토글)에서 현재 포맷 식별.
+//   - DB의 finalize_runs에서 (sc_id, format)으로 원본 full markdown 조회 — embed.Description은
+//     4090자에서 잘려 있을 수 있으므로 SSOT로 부적합.
+//   - 조회 성공 시 그 OutputMD를 .md 파일 첨부.
+//   - 조회 실패/없음 시 embed.Description fallback + 잘림 가능성 명시 안내.
 //   - 파일 첨부 방식 채택 이유:
-//     · Discord ephemeral message content 한도 2000자 vs embed 한도 4090자 → 인라인 fenced code block은
+//     · Discord ephemeral content 한도 2000자 vs embed 한도 4090자 → 인라인 fenced code block은
 //       1984자에서 잘렸음. 파일 첨부는 10MB 한도라 사실상 무제한.
 //     · 정리본 markdown 안에 fenced code block(```) 이 있으면 outer ```markdown fence가 닫혀버려
 //       복사 깨졌음. 파일 첨부는 원본 그대로 보존.
-//   - 사용자는 파일 다운로드 후 좋아하는 editor에서 복사/편집. 모바일도 미리보기 + 복사 지원.
-//   - 별도 active format 추적 불필요 — 메시지 embed가 SSOT.
 //
 // 호출 계약: 호출자(discord.go)가 이미 deferred ack 완료.
 func HandleFormatCopy(
@@ -629,10 +664,36 @@ func HandleFormatCopy(
 		return
 	}
 
-	md := i.Message.Embeds[0].Description
-	if md == "" {
+	// active 포맷 식별 — button row의 SuccessButton에서 추출.
+	// 식별 실패 시 embed.Description fallback (truncated 가능성 명시).
+	activeFormat, hasActiveFormat := activeFormatFromMessage(i.Message)
+	embedDesc := i.Message.Embeds[0].Description
+	if embedDesc == "" {
 		sendError("복사할 정리본 내용이 비어 있습니다.")
 		return
+	}
+
+	// DB 캐시에서 원본 full markdown 조회 시도.
+	var md string
+	var sourceLabel string
+	if hasActiveFormat && dbConn != nil && sess.DBSessionID != "" {
+		scRow, err := dbConn.GetLatestSummarizedContent(ctx, sess.DBSessionID)
+		if err == nil {
+			run, qErr := dbConn.GetFinalizeRunByFormat(ctx, scRow.ID, formatToDBKind(activeFormat))
+			if qErr == nil && run != nil && run.OutputMD != "" {
+				md = run.OutputMD
+				sourceLabel = "DB 원본"
+				log.Printf("[미팅/format_copy] DB 원본 사용 thread=%s sc=%s format=%s runes=%d",
+					sess.ThreadID, scRow.ID, activeFormat, len([]rune(md)))
+			}
+		}
+	}
+	// DB 조회 실패 시 embed.Description fallback.
+	if md == "" {
+		md = embedDesc
+		sourceLabel = "embed (잘림 가능)"
+		log.Printf("[미팅/format_copy] embed fallback 사용 thread=%s runes=%d (DB 조회 실패 또는 active 식별 실패)",
+			sess.ThreadID, len([]rune(md)))
 	}
 
 	// .md 파일 첨부 — 파일명 thread + timestamp로 고유.
@@ -640,8 +701,12 @@ func HandleFormatCopy(
 	filename := fmt.Sprintf("meeting-summary-%s-%s.md",
 		sess.ThreadID, time.Now().Format("20060102-150405"))
 
-	notice := fmt.Sprintf("정리본 markdown 파일을 첨부했습니다 (%d자).\n파일을 다운로드해 원본 그대로 복사하거나 다른 곳에 붙여넣으세요.",
-		totalRunes)
+	noticePrefix := "정리본 markdown 파일을 첨부했습니다"
+	if sourceLabel == "embed (잘림 가능)" {
+		noticePrefix = "정리본 markdown 파일을 첨부했습니다 (embed 표시본 기준 — 4090자에서 잘렸을 수 있음)"
+	}
+	notice := fmt.Sprintf("%s (%d자).\n파일을 다운로드해 원본 그대로 복사하거나 다른 곳에 붙여넣으세요.",
+		noticePrefix, totalRunes)
 
 	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 		Content: notice,

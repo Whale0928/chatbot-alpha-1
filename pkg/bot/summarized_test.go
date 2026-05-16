@@ -1156,3 +1156,216 @@ func TestHandleFormatToggle_InFlightGuard_BlocksConcurrentCacheMiss(t *testing.T
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// ===== Codex review PR #14 P2: 복사 시 DB 캐시 full markdown 우선 사용 =====
+
+func TestHandleFormatCopy_UsesDBCachedMarkdown_NotTruncatedEmbed(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+	oldDBConn := dbConn
+	t.Cleanup(func() { dbConn = oldDBConn })
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_copy_db",
+		ThreadID: "thread-copy-db",
+		GuildID:  "guild-copy-db",
+		OwnerID:  "owner-copy-db",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	if err := d.InsertSummarizedContent(ctx, db.SummarizedContent{
+		ID:          "sc_copy_db",
+		SessionID:   "sess_copy_db",
+		Content:     []byte(`{}`),
+		ExtractedAt: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("InsertSummarizedContent: %v", err)
+	}
+
+	// DB에는 full markdown 5000자, embed에는 잘린 4090자.
+	fullMD := strings.Repeat("가", 5000) + "\n끝"
+	truncatedEmbed := string([]rune(fullMD)[:4090]) + "…"
+	if err := d.InsertFinalizeRun(ctx, db.FinalizeRun{
+		ID:                  "fr_copy_db",
+		SummarizedContentID: "sc_copy_db",
+		Format:              db.FormatDecisionStatus,
+		OutputMD:            fullMD,
+		CreatedAt:           time.Now(),
+	}); err != nil {
+		t.Fatalf("InsertFinalizeRun: %v", err)
+	}
+
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	// 메시지 button row: decision_status SuccessButton (active) + 나머지 Secondary + Primary 복사.
+	msg := &discordgo.Message{
+		Embeds: []*discordgo.MessageEmbed{{Description: truncatedEmbed}},
+		Components: []discordgo.MessageComponent{
+			&discordgo.ActionsRow{
+				Components: []discordgo.MessageComponent{
+					&discordgo.Button{Label: "결정+진행", Style: discordgo.SuccessButton, CustomID: customIDFormatToggleDecisionStatus},
+					&discordgo.Button{Label: "논의", Style: discordgo.SecondaryButton, CustomID: customIDFormatToggleDiscussion},
+					&discordgo.Button{Label: "역할별", Style: discordgo.SecondaryButton, CustomID: customIDFormatToggleRoleBased},
+					&discordgo.Button{Label: "자율", Style: discordgo.SecondaryButton, CustomID: customIDFormatToggleFreeform},
+					&discordgo.Button{Label: "복사", Style: discordgo.PrimaryButton, CustomID: customIDFormatCopy},
+				},
+			},
+		},
+	}
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID:   "app-copy-db",
+			Token:   "token-copy-db",
+			Message: msg,
+		},
+	}
+	sess := &Session{ThreadID: "thread-copy-db", DBSessionID: "sess_copy_db"}
+
+	HandleFormatCopy(ctx, discordSession, interaction, sess)
+
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
+	}
+	body := rt.calls[0].body
+	// 파일 본문에 full markdown 끝(잘리지 않은 부분)이 포함돼야 함.
+	if !strings.Contains(body, "끝") {
+		t.Errorf("file body missing tail of full markdown (DB cached SSOT 미사용):\n%s", body[:min(500, len(body))])
+	}
+	// 안내 메시지는 5002자 (full: "가"×5000 + "\n끝") 표시 — truncated 4090 아님.
+	if !strings.Contains(body, "5002") {
+		t.Errorf("notice text missing full-length count 5002:\n%s", body[:min(500, len(body))])
+	}
+	// embed fallback 안내는 없어야 함.
+	if strings.Contains(body, "잘렸을 수 있음") {
+		t.Errorf("DB hit인데 'embed 잘림' 안내가 들어감:\n%s", body[:min(500, len(body))])
+	}
+}
+
+func TestHandleFormatCopy_FallsBackToEmbed_WhenDBMiss(t *testing.T) {
+	ctx := context.Background()
+	d := newBotTestDB(t)
+	oldDBConn := dbConn
+	t.Cleanup(func() { dbConn = oldDBConn })
+	dbConn = d
+
+	if err := d.InsertSession(ctx, db.Session{
+		ID:       "sess_copy_dbmiss",
+		ThreadID: "thread-copy-dbmiss",
+		GuildID:  "g",
+		OwnerID:  "o",
+		OpenedAt: time.Unix(1700000000, 0),
+		Status:   db.SessionActive,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	// finalize_runs 비어 있음 (cache miss). summarized_contents 도 없음.
+
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	embedMD := "## 결정\n- short markdown"
+	msg := &discordgo.Message{
+		Embeds: []*discordgo.MessageEmbed{{Description: embedMD}},
+		Components: []discordgo.MessageComponent{
+			&discordgo.ActionsRow{
+				Components: []discordgo.MessageComponent{
+					&discordgo.Button{Label: "결정+진행", Style: discordgo.SuccessButton, CustomID: customIDFormatToggleDecisionStatus},
+				},
+			},
+		},
+	}
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID:   "app-copy-dbmiss",
+			Token:   "token-copy-dbmiss",
+			Message: msg,
+		},
+	}
+	sess := &Session{ThreadID: "thread-copy-dbmiss", DBSessionID: "sess_copy_dbmiss"}
+
+	HandleFormatCopy(ctx, discordSession, interaction, sess)
+
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
+	}
+	body := rt.calls[0].body
+	// embed fallback 안내가 있어야 함.
+	if !strings.Contains(body, "잘렸을 수 있음") {
+		t.Errorf("embed fallback notice 누락:\n%s", body[:min(500, len(body))])
+	}
+	// 파일 본문은 embed markdown 그대로.
+	if !strings.Contains(body, "short markdown") {
+		t.Errorf("file body missing embed markdown:\n%s", body[:min(500, len(body))])
+	}
+}
+
+func TestActiveFormatFromMessage(t *testing.T) {
+	cases := []struct {
+		name      string
+		msg       *discordgo.Message
+		wantFmt   llm.NoteFormat
+		wantFound bool
+	}{
+		{
+			name:      "nil message",
+			msg:       nil,
+			wantFound: false,
+		},
+		{
+			name: "no components",
+			msg:  &discordgo.Message{},
+		},
+		{
+			name: "discussion active",
+			msg: &discordgo.Message{Components: []discordgo.MessageComponent{
+				&discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+					&discordgo.Button{Style: discordgo.SecondaryButton, CustomID: customIDFormatToggleDecisionStatus},
+					&discordgo.Button{Style: discordgo.SuccessButton, CustomID: customIDFormatToggleDiscussion},
+					&discordgo.Button{Style: discordgo.PrimaryButton, CustomID: customIDFormatCopy}, // 복사는 매치 X
+				}},
+			}},
+			wantFmt:   llm.FormatDiscussion,
+			wantFound: true,
+		},
+		{
+			name: "no success button",
+			msg: &discordgo.Message{Components: []discordgo.MessageComponent{
+				&discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+					&discordgo.Button{Style: discordgo.SecondaryButton, CustomID: customIDFormatToggleDecisionStatus},
+					&discordgo.Button{Style: discordgo.PrimaryButton, CustomID: customIDFormatCopy},
+				}},
+			}},
+			wantFound: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := activeFormatFromMessage(c.msg)
+			if ok != c.wantFound {
+				t.Errorf("ok = %v, want %v", ok, c.wantFound)
+			}
+			if c.wantFound && got != c.wantFmt {
+				t.Errorf("format = %v, want %v", got, c.wantFmt)
+			}
+		})
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
