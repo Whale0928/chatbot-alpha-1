@@ -10,7 +10,21 @@ Common rules:
 - Decisions and actions must preserve their input Origin attribution. Do not invent a new author.
 - WeeklyReports, ReleaseResults, AgentResponses, and ExternalRefs are bot/tool/reference results. Never attribute them to a human as a decision or action.
 - Return JSON only: { "markdown": "..." }. The markdown string is the Discord embed description body.
-- Keep the markdown concise enough for a Discord embed description; target under 4090 characters.`
+- Keep the markdown concise enough for a Discord embed description; target under 4090 characters.
+
+STRICT field→section mapping (no cross-fill, no duplication):
+  - 📊 주간 분석     ← weekly_reports field ONLY. Empty if weekly_reports is empty.
+  - 🚀 릴리즈 작업    ← release_results field ONLY. Empty if release_results is empty.
+                       Do NOT pull from done/in_progress/planned/blockers — those are HUMAN sections.
+  - 🤖 AI 에이전트   ← agent_responses field ONLY.
+  - 📎 외부 자료     ← external_refs field ONLY.
+  - 🗣️ 사람 결정사항  ← decisions field ONLY. Empty if decisions is empty.
+  - 📋 액션 아이템    ← actions field ONLY.
+  - ⚠️ 추적 필요     ← blockers + open_questions ONLY.
+  - 💬 토픽 / 진행 중 / 예정 / 완료 등 ← topics/in_progress/planned/done fields ONLY (human only).
+
+If a section's source field is empty, output the section header followed by "(없음)" — DO NOT silently fill it
+with content from another field. The user explicitly wants empty sections shown as empty.`
 
 // FormatRenderDecisionStatus는 SummarizedContent를 결정+진행 상태 중심 markdown으로 재렌더한다.
 const FormatRenderDecisionStatus = formatRenderCommon + `

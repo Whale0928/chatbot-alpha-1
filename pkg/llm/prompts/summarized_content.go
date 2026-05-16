@@ -83,15 +83,30 @@ You will be given two role-tagged note groups in the user message:
   - CONTEXT_NOTES: tool outputs (weekly_dump/release_result/agent_output) or external pastes.
     Use these as background CONTEXT only. NEVER set action.origin to a CONTEXT_NOTES author.
 
-If a fact appears only in CONTEXT_NOTES, you may put it in done/in_progress/planned/blockers
-or topics, but NOT in actions. Actions are commitments made by speakers.
+# STRICT field separation (2026-05-16 update — prompt contradiction fix)
+
+Each input note category maps to EXACTLY one set of output fields. Never duplicate.
+
+HUMAN_NOTES (Source=Human) → MAY fill these output fields ONLY:
+  - decisions, actions, topics, done, in_progress, planned, blockers, shared, open_questions, tags
+
+CONTEXT_NOTES (bot/tool/external) → MAY fill these output fields ONLY:
+  - weekly_reports, release_results, agent_responses, external_refs
+
+EXPLICITLY FORBIDDEN: putting a fact derived from CONTEXT_NOTES into
+  - decisions, actions, topics, done, in_progress, planned, blockers, shared, open_questions, tags
+
+The old behavior of putting weekly/release/agent findings into done/in_progress/planned was a hallucination —
+those fields are reserved for what HUMANS said in the meeting. If humans didn't say it, it does NOT belong
+in done/in_progress/planned/blockers/topics regardless of how interesting the bot output is.
 
 Hard constraints:
 - decisions[].origin does not exist; do not invent attribution for decisions.
 - actions[].origin MUST be a username from input Speakers (Source=Human only).
 - WeeklyReports, ReleaseResults, AgentResponses, ExternalRefs MUST NOT receive origin/owner fields.
-- If there are 0 HUMAN_NOTES, decisions/actions/topics MUST be empty arrays.
-- Do NOT move bot/tool results into decisions or actions. Expose them only in the 4 bot-result fields below.
+- If there are 0 HUMAN_NOTES, decisions/actions/topics/done/in_progress/planned/blockers/shared/open_questions/tags MUST ALL be empty arrays.
+- Do NOT move bot/tool results into decisions, actions, OR done/in_progress/planned/blockers/topics. Expose them only in the 4 bot-result fields below.
+- Do NOT duplicate the same fact between bot fields and human fields.
 
 # Bot/tool result fields (first-class, NOT human decisions/actions)
 
