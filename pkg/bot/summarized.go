@@ -351,10 +351,11 @@ func renderSummarizedByFormat(
 // chunk 3c — 정리본 메시지의 4 포맷 토글 button + 토글 핸들러
 // =====================================================================
 
-// formatToggleComponents는 정리본 메시지에 첨부되는 4 포맷 토글 button row를 생성한다.
-// 모든 4 button을 한 row에 (Discord 5-button-per-row 제약 안에 적합).
+// formatToggleComponents는 정리본 메시지에 첨부되는 4 포맷 토글 + [복사] button row를 생성한다.
+// Discord는 한 ActionsRow에 button 5개까지 — 토글 4 + 복사 1 = 5, 한 row에 모두 적합.
 //
 // 활성 포맷 button은 SuccessButton (강조), 나머지는 SecondaryButton.
+// [복사] button은 PrimaryButton (시각 구분, 항상 active 무관).
 func formatToggleComponents(active llm.NoteFormat) []discordgo.MessageComponent {
 	style := func(f llm.NoteFormat) discordgo.ButtonStyle {
 		if f == active {
@@ -369,6 +370,7 @@ func formatToggleComponents(active llm.NoteFormat) []discordgo.MessageComponent 
 				discordgo.Button{Label: "논의", Style: style(llm.FormatDiscussion), CustomID: customIDFormatToggleDiscussion},
 				discordgo.Button{Label: "역할별", Style: style(llm.FormatRoleBased), CustomID: customIDFormatToggleRoleBased},
 				discordgo.Button{Label: "자율", Style: style(llm.FormatFreeform), CustomID: customIDFormatToggleFreeform},
+				discordgo.Button{Label: "복사", Style: discordgo.PrimaryButton, CustomID: customIDFormatCopy},
 			},
 		},
 	}
@@ -544,6 +546,78 @@ func HandleFormatToggle(
 
 	log.Printf("[미팅/format_toggle] 완료 thread=%s sc=%s format=%s rendered_bytes=%d",
 		sess.ThreadID, scRow.ID, format, len(rendered))
+}
+
+// HandleFormatCopy는 정리본 메시지의 [복사] button 클릭 핸들러.
+//
+// 동작:
+//   - 현재 메시지 embed.Description (활성 포맷 markdown) 을 그대로
+//     ephemeral followup message에 fenced code block으로 감싸서 보냄.
+//   - Discord 모바일/데스크탑 모두 fenced code block 길게 누르기 / 드래그로 복사 가능.
+//   - 별도 active format 추적 불필요 — 메시지 embed가 SSOT.
+//
+// 4096자 한도 (embed.Description) → fenced code block fence 7자 + "markdown" 8자
+// = 약 4079자가 안전. 더 길면 잘라서 보냄 (정리본 자체가 4090 잘렸으면 추가 잘림 없음).
+//
+// 호출 계약: 호출자(discord.go)가 이미 deferred ack 완료.
+func HandleFormatCopy(
+	ctx context.Context,
+	s *discordgo.Session,
+	i *discordgo.InteractionCreate,
+	sess *Session,
+) {
+	sendFollowup := func(content string) {
+		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: content,
+			Flags:   discordgo.MessageFlagsEphemeral,
+		})
+		if err != nil {
+			log.Printf("[미팅/format_copy] ERR followup 전송 실패 thread=%s: %v", sess.ThreadID, err)
+		}
+	}
+
+	if i.Message == nil || len(i.Message.Embeds) == 0 || i.Message.Embeds[0] == nil {
+		logGuard("meeting/format_copy", "no_embed",
+			"메시지에 embed가 없어 복사 대상 없음",
+			lf("thread", sess.ThreadID))
+		sendFollowup("복사할 정리본 내용을 찾을 수 없습니다. 메시지를 다시 생성해주세요.")
+		return
+	}
+
+	md := i.Message.Embeds[0].Description
+	if md == "" {
+		sendFollowup("복사할 정리본 내용이 비어 있습니다.")
+		return
+	}
+
+	// fenced code block 길이 안전 계산.
+	// "```markdown\n" (12자) + md + "\n```" (4자) = wrapper 16자.
+	// Discord ephemeral message content 한도 2000자.
+	const (
+		fenceOpen      = "```markdown\n"
+		fenceClose     = "\n```"
+		wrapperLen     = len(fenceOpen) + len(fenceClose) // 16
+		maxContentLen  = 2000
+		maxBodyRunes   = maxContentLen - wrapperLen       // 1984
+		truncateMarker = "\n…(이하 잘림 — 전체는 위 정리본 embed 참조)"
+	)
+
+	body := md
+	runes := []rune(body)
+	if len(runes) > maxBodyRunes {
+		// truncateMarker도 안전 영역 안에 들어가도록 추가 여유 확보.
+		cutAt := maxBodyRunes - len([]rune(truncateMarker))
+		if cutAt < 0 {
+			cutAt = 0
+		}
+		body = string(runes[:cutAt]) + truncateMarker
+		log.Printf("[미팅/format_copy] WARN content %d자 → %d자로 잘림 (Discord 2000자 한도) thread=%s",
+			len(runes), len([]rune(body)), sess.ThreadID)
+	}
+
+	content := fenceOpen + body + fenceClose
+	sendFollowup(content)
+	log.Printf("[미팅/format_copy] 완료 thread=%s body_bytes=%d", sess.ThreadID, len(body))
 }
 
 // buildSummarizedEmbed는 정리본 markdown을 Discord embed로 wrapping한다.

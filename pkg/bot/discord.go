@@ -383,6 +383,23 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		defer cancel()
 		HandleFormatToggle(ctx, s, i, sess, data.CustomID)
 
+	// === Phase 2 chunk 3c-2 — 정리본 메시지의 [복사] button ===
+	// 현재 embed.Description (활성 포맷 markdown) 을 fenced code block로 ephemeral followup.
+	// 메시지 edit 없음 — 원본 정리본 그대로 유지.
+	case customIDFormatCopy:
+		log.Printf("[미팅/format_copy] 클릭 thread=%s by=%s", sess.ThreadID, interactionCallerUsername(i))
+		// Deferred ephemeral ack — 복사는 메시지 edit 아니라 followup이므로 DeferredChannelMessageWithSource + ephemeral.
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
+		}); err != nil {
+			log.Printf("[미팅/format_copy] ERR ack 실패: %v", err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		HandleFormatCopy(ctx, s, i, sess)
+
 	// === Phase 2 chunk 3b — [정리본 통합·토글] 버튼 → SummarizedContent 1회 추출 ===
 	// LLM 1회 호출 후 default(decision_status)로 렌더 + 4 포맷 토글 button row 첨부.
 	case customIDFinalizeSummarized:
