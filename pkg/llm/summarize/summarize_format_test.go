@@ -161,8 +161,9 @@ func TestRenderFormat_포맷별_MockLLM응답을_markdown으로_반환한다(t *
 	}
 }
 
-func TestRenderFormat_빈SummarizedContent도_없음섹션_markdown을_반환한다(t *testing.T) {
-	markdown := "## 📊 주간 분석\n- (없음)\n\n## 🚀 릴리즈 작업\n- (없음)\n\n## 🗣️ 사람 결정사항\n- 이번 회의에서는 없음"
+// v3.2 정책: 빈 SummarizedContent 입력 시 LLM은 "(없음)" 플레이스홀더 없이 단일 문장 "정리할 내용이 없습니다."를 반환해야 한다.
+func TestRenderFormat_빈SummarizedContent일때_정리없음_단일문장을_반환한다(t *testing.T) {
+	markdown := "정리할 내용이 없습니다."
 	var requests []renderFormatRequest
 	c := newRenderFormatStubClient(t, mustMarkdownJSON(t, markdown), http.StatusOK, &requests)
 
@@ -174,11 +175,33 @@ func TestRenderFormat_빈SummarizedContent도_없음섹션_markdown을_반환한
 	if err != nil {
 		t.Fatalf("RenderFormat returned error: %v", err)
 	}
-	if strings.Count(got, "(없음)") < 2 {
-		t.Fatalf("expected multiple explicit empty sections, got:\n%s", got)
+	if got != markdown {
+		t.Fatalf("expected single-sentence output for empty content, got:\n%s", got)
+	}
+	if strings.Contains(got, "(없음)") {
+		t.Fatalf("v3.2 policy: output must not contain '(없음)' placeholder, got:\n%s", got)
 	}
 	if !strings.Contains(requests[0].Messages[1].Content, `"decisions": []`) {
 		t.Fatalf("empty arrays should be serialized explicitly:\n%s", requests[0].Messages[1].Content)
+	}
+}
+
+// v3.2 정책: LLM이 "(없음)" 플레이스홀더를 출력하면 validator가 거부한다.
+func TestRenderFormat_없음플레이스홀더_출력시_거부한다(t *testing.T) {
+	markdown := "## 이번 회의에서 합의한 결정\n- (없음)\n\n## 앞으로 진행할 작업\n- (없음)"
+	var requests []renderFormatRequest
+	c := newRenderFormatStubClient(t, mustMarkdownJSON(t, markdown), http.StatusOK, &requests)
+
+	_, err := RenderFormat(context.Background(), c, FormatRenderInput{
+		Content: &llm.SummarizedContent{},
+		Format:  llm.FormatDecisionStatus,
+		Date:    time.Date(2026, 5, 14, 0, 0, 0, 0, time.UTC),
+	})
+	if err == nil {
+		t.Fatal("expected validator to reject '(없음)' placeholder, got nil")
+	}
+	if !strings.Contains(err.Error(), "(없음)") {
+		t.Fatalf("expected '(없음)' in error message, got: %v", err)
 	}
 }
 

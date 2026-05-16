@@ -215,6 +215,11 @@ func validateFormatRenderMarkdown(markdown string, in FormatRenderInput) error {
 		return fmt.Errorf("llm: format render bullet depth exceeded two nested levels")
 	}
 
+	// v3.2 정책: 빈 섹션 "(없음)" 플레이스홀더 금지. 빈 필드는 섹션 헤더째 제거해야 함.
+	if strings.Contains(markdown, "(없음)") {
+		return fmt.Errorf("llm: format render output contains forbidden empty placeholder '(없음)'")
+	}
+
 	allowed := allowedAttributionNames(in)
 	attribution := regexp.MustCompile(`(?m)^\s*-\s+@([A-Za-z0-9_.-]+)\s*:`)
 	for _, match := range attribution.FindAllStringSubmatch(markdown, -1) {
