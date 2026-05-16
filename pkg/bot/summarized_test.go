@@ -435,6 +435,24 @@ func TestFormatToggleComponents_ActiveHighlighted(t *testing.T) {
 	}
 }
 
+func TestFormatToggleLabel(t *testing.T) {
+	cases := []struct {
+		in   llm.NoteFormat
+		want string
+	}{
+		{llm.FormatDecisionStatus, "결정+진행"},
+		{llm.FormatDiscussion, "논의"},
+		{llm.FormatRoleBased, "역할별"},
+		{llm.FormatFreeform, "자율"},
+	}
+	for _, c := range cases {
+		got := formatToggleLabel(c.in)
+		if got != c.want {
+			t.Errorf("formatToggleLabel(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestFormatFromToggleCustomID(t *testing.T) {
 	tests := []struct {
 		id   string
@@ -605,7 +623,8 @@ func TestHandleFormatToggle_UsesFinalizeRunCache(t *testing.T) {
 		Source:      db.SourceHuman,
 	})
 
-	toggle := func(customID, wantBody string, wantRenderCalls int, wantFinalizeRuns int) {
+	// wantHTTPCalls: cache miss는 placeholder edit + final edit = 2 HTTP, cache hit은 final edit만 = 1.
+	toggle := func(customID, wantBody string, wantRenderCalls int, wantFinalizeRuns int, wantHTTPCalls int) {
 		t.Helper()
 		beforeHTTP := len(rt.calls)
 
@@ -614,15 +633,23 @@ func TestHandleFormatToggle_UsesFinalizeRunCache(t *testing.T) {
 		if summ.renderFormatCalls != wantRenderCalls {
 			t.Fatalf("RenderFormat calls = %d, want %d", summ.renderFormatCalls, wantRenderCalls)
 		}
-		if len(rt.calls) != beforeHTTP+1 {
-			t.Fatalf("HTTP calls delta = %d, want 1", len(rt.calls)-beforeHTTP)
+		if delta := len(rt.calls) - beforeHTTP; delta != wantHTTPCalls {
+			t.Fatalf("HTTP calls delta = %d, want %d", delta, wantHTTPCalls)
 		}
+		// 마지막 호출이 final edit이어야 하고 wantBody를 포함해야 함.
 		call := rt.calls[len(rt.calls)-1]
 		if call.method != http.MethodPatch {
 			t.Fatalf("HTTP method = %s, want PATCH", call.method)
 		}
 		if !strings.Contains(call.body, wantBody) {
-			t.Fatalf("edit body missing %q:\n%s", wantBody, call.body)
+			t.Fatalf("final edit body missing %q:\n%s", wantBody, call.body)
+		}
+		// 2 HTTP calls (cache miss)인 경우, 첫 호출은 placeholder ("다시 만드는 중") 이어야 함.
+		if wantHTTPCalls == 2 {
+			placeholderCall := rt.calls[len(rt.calls)-2]
+			if !strings.Contains(placeholderCall.body, "다시 만드는 중") {
+				t.Fatalf("placeholder edit body missing '다시 만드는 중':\n%s", placeholderCall.body)
+			}
 		}
 
 		var count int
@@ -650,10 +677,12 @@ func TestHandleFormatToggle_UsesFinalizeRunCache(t *testing.T) {
 	for idx, tc := range cases {
 		wantCalls := idx + 1
 		wantRuns := idx + 1
-		toggle(tc.customID, tc.body, wantCalls, wantRuns)
+		// 첫 클릭: cache miss → placeholder + final = 2 HTTP
+		toggle(tc.customID, tc.body, wantCalls, wantRuns, 2)
 
 		summ.outputs[tc.format] = "rerender should not be used"
-		toggle(tc.customID, tc.body, wantCalls, wantRuns)
+		// 두 번째 클릭: cache hit → final만 = 1 HTTP
+		toggle(tc.customID, tc.body, wantCalls, wantRuns, 1)
 	}
 }
 
@@ -727,11 +756,15 @@ func TestHandleFormatToggle_RenderFormatFailureFallsBackWithoutCachingPureRender
 	if summ.renderFormatCalls != 1 {
 		t.Fatalf("RenderFormat calls = %d, want 1", summ.renderFormatCalls)
 	}
-	if len(rt.calls) != 1 {
-		t.Fatalf("HTTP calls = %d, want 1", len(rt.calls))
+	// cache miss → placeholder edit + final edit = 2 HTTP calls.
+	if len(rt.calls) != 2 {
+		t.Fatalf("HTTP calls = %d, want 2 (placeholder + final)", len(rt.calls))
 	}
-	if !strings.Contains(rt.calls[0].body, "# 2026-05-14") || !strings.Contains(rt.calls[0].body, "fallback cached decision") {
-		t.Fatalf("edit body missing fallback render:\n%s", rt.calls[0].body)
+	if !strings.Contains(rt.calls[0].body, "다시 만드는 중") {
+		t.Fatalf("first call body missing placeholder '다시 만드는 중':\n%s", rt.calls[0].body)
+	}
+	if !strings.Contains(rt.calls[1].body, "# 2026-05-14") || !strings.Contains(rt.calls[1].body, "fallback cached decision") {
+		t.Fatalf("final edit body missing fallback render:\n%s", rt.calls[1].body)
 	}
 	var count int
 	if err := d.QueryRowContext(ctx,
