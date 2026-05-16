@@ -161,16 +161,20 @@ func TestFinalizeSummarized_PhaseACacheToggleRegression(t *testing.T) {
 		},
 	}
 
-	toggleAndAssert := func(customID, callKey string, wantCalls int, wantRuns int, wantBody string) {
+	// wantHTTPCalls: cache miss는 placeholder edit + final edit = 2, cache hit은 final edit만 = 1.
+	toggleAndAssert := func(customID, callKey string, wantCalls int, wantRuns int, wantHTTPCalls int, wantBody string) {
 		t.Helper()
 		beforeHTTP := len(rt.calls)
 		HandleFormatToggle(ctx, discordSession, interaction, sess, customID)
 		assertCallCount(t, summ.callCounts, callKey, wantCalls)
-		if len(rt.calls) != beforeHTTP+1 {
-			t.Fatalf("HTTP calls delta = %d, want 1", len(rt.calls)-beforeHTTP)
+		if delta := len(rt.calls) - beforeHTTP; delta != wantHTTPCalls {
+			t.Fatalf("HTTP calls delta = %d, want %d", delta, wantHTTPCalls)
 		}
 		if !strings.Contains(rt.calls[len(rt.calls)-1].body, wantBody) {
-			t.Fatalf("edit body missing %q:\n%s", wantBody, rt.calls[len(rt.calls)-1].body)
+			t.Fatalf("final edit body missing %q:\n%s", wantBody, rt.calls[len(rt.calls)-1].body)
+		}
+		if wantHTTPCalls == 2 && !strings.Contains(rt.calls[len(rt.calls)-2].body, "다시 만드는 중") {
+			t.Fatalf("placeholder edit body missing '다시 만드는 중':\n%s", rt.calls[len(rt.calls)-2].body)
 		}
 		var count int
 		if err := d.QueryRowContext(ctx, "SELECT COUNT(*) FROM finalize_runs").Scan(&count); err != nil {
@@ -181,10 +185,14 @@ func TestFinalizeSummarized_PhaseACacheToggleRegression(t *testing.T) {
 		}
 	}
 
-	toggleAndAssert(customIDFormatToggleDecisionStatus, "RenderFormat:decision_status", 1, 1, "📊 주간 분석")
-	toggleAndAssert(customIDFormatToggleDiscussion, "RenderFormat:discussion", 1, 2, "discussion render from LLM")
-	toggleAndAssert(customIDFormatToggleDecisionStatus, "RenderFormat:decision_status", 1, 2, "📊 주간 분석")
-	toggleAndAssert(customIDFormatToggleDiscussion, "RenderFormat:discussion", 1, 2, "discussion render from LLM")
+	// 1. decision_status (cache hit — FinalizeSummarized가 미리 캐시 채움) → 1 HTTP
+	toggleAndAssert(customIDFormatToggleDecisionStatus, "RenderFormat:decision_status", 1, 1, 1, "📊 주간 분석")
+	// 2. discussion (cache miss) → placeholder + final = 2 HTTP
+	toggleAndAssert(customIDFormatToggleDiscussion, "RenderFormat:discussion", 1, 2, 2, "discussion render from LLM")
+	// 3. decision_status (cache hit) → 1 HTTP
+	toggleAndAssert(customIDFormatToggleDecisionStatus, "RenderFormat:decision_status", 1, 2, 1, "📊 주간 분석")
+	// 4. discussion (cache hit) → 1 HTTP
+	toggleAndAssert(customIDFormatToggleDiscussion, "RenderFormat:discussion", 1, 2, 1, "discussion render from LLM")
 
 	cacheMissDrivenLLMCalls := summ.callCounts["ExtractContent"] + summ.callCounts["RenderFormat:discussion"]
 	if cacheMissDrivenLLMCalls != 2 {

@@ -394,6 +394,23 @@ func formatFromToggleCustomID(id string) (llm.NoteFormat, bool) {
 	}
 }
 
+// formatToggleLabel은 NoteFormat을 사용자 가시 한국어 라벨로 변환 (placeholder UX 용).
+// formatToggleComponents의 button Label과 일치시켜야 함 (사용자가 button과 placeholder를 시각 매핑).
+func formatToggleLabel(f llm.NoteFormat) string {
+	switch f {
+	case llm.FormatDecisionStatus:
+		return "결정+진행"
+	case llm.FormatDiscussion:
+		return "논의"
+	case llm.FormatRoleBased:
+		return "역할별"
+	case llm.FormatFreeform:
+		return "자율"
+	default:
+		return f.String()
+	}
+}
+
 // formatToDBKind은 llm.NoteFormat을 db.FormatKind로 변환 (DB persist용).
 func formatToDBKind(f llm.NoteFormat) db.FormatKind {
 	switch f {
@@ -481,6 +498,25 @@ func HandleFormatToggle(
 	case errors.Is(err, sql.ErrNoRows):
 		log.Printf("[meeting/format_toggle] cache_miss thread=%s format=%s sc=%s — LLM call",
 			sess.ThreadID, format, scRow.ID)
+
+		// Option 2 UX — cache miss는 LLM 호출 3-10초 걸려서 사용자가 "버튼 눌렀는데 반응 없음"으로 체감.
+		// LLM 호출 전에 즉시 placeholder embed로 edit해서 시각 피드백 제공.
+		// active 토글 button은 새 포맷으로 미리 강조 → 어떤 포맷 로딩 중인지 명확.
+		placeholderEmbed := &discordgo.MessageEmbed{
+			Description: fmt.Sprintf("**%s** 포맷으로 정리본을 다시 만드는 중입니다…\n\n잠시만 기다려주세요. (보통 3~10초 소요)",
+				formatToggleLabel(format)),
+		}
+		emptyContent := ""
+		placeholderEdit := &discordgo.WebhookEdit{
+			Content:    &emptyContent,
+			Embeds:     &[]*discordgo.MessageEmbed{placeholderEmbed},
+			Components: ptrComponents(formatToggleComponents(format)),
+		}
+		if _, err := s.InteractionResponseEdit(i.Interaction, placeholderEdit); err != nil {
+			// placeholder 실패는 치명 X — 로그만 남기고 LLM 호출 진행. 최종 edit에서 다시 시도.
+			log.Printf("[미팅/format_toggle] WARN placeholder edit 실패 (LLM 호출은 계속) thread=%s: %v",
+				sess.ThreadID, err)
+		}
 
 		var content llm.SummarizedContent
 		if err := json.Unmarshal(scRow.Content, &content); err != nil {
