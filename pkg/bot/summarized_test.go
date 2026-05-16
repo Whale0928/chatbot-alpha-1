@@ -1369,3 +1369,46 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// Codex review PR #14 2차 P2: placeholder 로딩 중 [복사] 클릭 시
+// "다시 만드는 중" 텍스트가 파일로 첨부되는 회귀 차단.
+func TestHandleFormatCopy_InFlight_RejectsCopy(t *testing.T) {
+	rt := &recordingRoundTripper{}
+	discordSession, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	discordSession.Client = &http.Client{Transport: rt}
+
+	// embed 자체는 정상 (placeholder 시뮬레이션 — "다시 만드는 중..." 텍스트).
+	msg := &discordgo.Message{
+		Embeds: []*discordgo.MessageEmbed{{
+			Description: "**논의** 포맷으로 정리본을 다시 만드는 중입니다…",
+		}},
+	}
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			AppID:   "app-copy-inflight",
+			Token:   "token-copy-inflight",
+			Message: msg,
+		},
+	}
+	sess := &Session{
+		ThreadID:             "thread-copy-inflight",
+		FormatToggleInFlight: true, // 다른 cache miss LLM 호출 진행 중
+	}
+
+	HandleFormatCopy(context.Background(), discordSession, interaction, sess)
+
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP calls = %d, want 1 (ephemeral reject followup만)", len(rt.calls))
+	}
+	body := rt.calls[0].body
+	if !strings.Contains(body, "포맷 변환이 진행 중") {
+		t.Errorf("in-flight reject message missing:\n%s", body[:min(500, len(body))])
+	}
+	// "다시 만드는 중" placeholder가 파일로 첨부되면 안 됨.
+	if strings.Contains(body, `filename="meeting-summary`) {
+		t.Errorf("placeholder text가 파일로 첨부됨 (회귀):\n%s", body[:min(500, len(body))])
+	}
+}

@@ -656,6 +656,20 @@ func HandleFormatCopy(
 		}
 	}
 
+	// Codex review PR #14 2차 P2: placeholder 로딩 중 [복사] 클릭 시
+	// embed.Description이 "다시 만드는 중..." 텍스트라 그게 파일로 첨부되는 회귀 차단.
+	// FormatToggleInFlight=true면 즉시 거부 안내.
+	sess.NotesMu.Lock()
+	inFlight := sess.FormatToggleInFlight
+	sess.NotesMu.Unlock()
+	if inFlight {
+		logGuard("meeting/format_copy", "in_flight",
+			"포맷 토글 LLM 호출 진행 중 — 복사 거부 (placeholder 첨부 회귀 방지)",
+			lf("thread", sess.ThreadID))
+		sendError("포맷 변환이 진행 중입니다. 정리본 갱신이 끝난 뒤 다시 [복사]를 눌러주세요.")
+		return
+	}
+
 	if i.Message == nil || len(i.Message.Embeds) == 0 || i.Message.Embeds[0] == nil {
 		logGuard("meeting/format_copy", "no_embed",
 			"메시지에 embed가 없어 복사 대상 없음",
